@@ -1,0 +1,10 @@
+node_modules/
+recordings/*.mp3
+recordings/*.wav
+recordings/*.m4a
+.env
+ignore_directory
+.claude
+CLAUDE.md
+recordings
+screenshots

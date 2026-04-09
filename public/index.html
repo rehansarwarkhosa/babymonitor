@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Baby Monitor</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #FAFAFA;
+      color: #333333;
+      min-height: 100vh;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .pulse { animation: pulse 1.5s ease-in-out infinite; }
+
+    @keyframes dot-pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.3); }
+    }
+    .dot-pulse { animation: dot-pulse 1.5s ease-in-out infinite; }
+
+    select:focus, button:focus { outline: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ─── Helpers ──────────────────────────────────────────
+    const formatSize = (bytes) => {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    };
+
+    const formatDate = (dateStr) => {
+      const d = new Date(dateStr);
+      return d.toLocaleDateString(undefined, {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+      });
+    };
+
+    const formatTime = (seconds) => {
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      return `${m}:${s.toString().padStart(2, '0')}`;
+    };
+
+    const timeAgo = (dateStr) => {
+      if (!dateStr) return '';
+      const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+      if (diff < 60) return `${diff}s ago`;
+      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+      return `${Math.floor(diff / 86400)}d ago`;
+    };
+
+    const durationOptions = [
+      { label: '15 seconds', value: 15 },
+      { label: '30 seconds', value: 30 },
+      { label: '1 minute', value: 60 },
+      { label: '5 minutes', value: 300 },
+      { label: '10 minutes', value: 600 },
+      { label: '15 minutes', value: 900 },
+    ];
+
+    // ─── App Component ───────────────────────────────────
+    function App() {
+      const [devices, setDevices] = useState({});
+      const [selectedDevices, setSelectedDevices] = useState([]);
+      const [selectedDuration, setSelectedDuration] = useState(60);
+      const [recordings, setRecordings] = useState({});
+      const [filterDevice, setFilterDevice] = useState('all');
+      const [error, setError] = useState('');
+      const [editingDevice, setEditingDevice] = useState(null);
+      const [editName, setEditName] = useState('');
+      const [timers, setTimers] = useState({});
+      const [screenshots, setScreenshots] = useState({});
+      const [screenshotStatus, setScreenshotStatus] = useState({});
+      const [activeTab, setActiveTab] = useState('recordings');
+      const [lightboxImg, setLightboxImg] = useState(null);
+      const socketRef = useRef(null);
+      const timerIntervalsRef = useRef({});
+
+      const deviceList = Object.values(devices);
+      const onlineDevices = deviceList.filter(d => d.isOnline);
+      const onlineCount = onlineDevices.length;
+
+      // Fetch recordings
+      const fetchRecordings = useCallback(async () => {
+        try {
+          const res = await fetch('/recordings');
+          const data = await res.json();
+          setRecordings(data);
+        } catch (err) {
+          console.error('Failed to fetch recordings:', err);
+        }
+      }, []);
+
+      // Fetch screenshots
+      const fetchScreenshots = useCallback(async () => {
+        try {
+          const res = await fetch('/api/screenshots');
+          const data = await res.json();
+          setScreenshots(data);
+        } catch (err) {
+          console.error('Failed to fetch screenshots:', err);
+        }
+      }, []);
+
+      // Socket.io
+      useEffect(() => {
+        const socket = io();
+        socketRef.current = socket;
+
+        socket.on('connect', () => setError(''));
+        socket.on('disconnect', () => setError('Lost connection to server. Reconnecting...'));
+
+        socket.on('devices_update', (data) => {
+          setDevices(data);
+          // Remove selected devices that no longer exist
+          setSelectedDevices(prev => prev.filter(id => data[id]));
+        });
+
+        socket.on('new_recording', () => fetchRecordings());
+
+        socket.on('recording_error', (data) => {
+          setError(`Recording error on ${data.deviceName || data.deviceId}: ${data.error}`);
+        });
+
+        socket.on('upload_error', (data) => {
+          setError(`Upload error on ${data.deviceName || data.deviceId}: ${data.error}`);
+        });
+
+        socket.on('screenshot_status', (data) => {
+          setScreenshotStatus(prev => ({ ...prev, [data.deviceId]: data }));
+          if (data.status === 'permission_required') {
+            setError(`Screenshot: Please grant permission on ${data.deviceName || data.deviceId}`);
+          }
+        });
+
+        socket.on('screenshot_captured', (data) => {
+          setScreenshotStatus(prev => ({ ...prev, [data.deviceId]: { ...data, status: 'uploading' } }));
+        });
+
+        socket.on('screenshot_uploaded', () => fetchScreenshots());
+        socket.on('screenshot_received', () => fetchScreenshots());
+
+        socket.on('screenshot_error', (data) => {
+          setError(`Screenshot error on ${data.deviceName || data.deviceId}: ${data.error}`);
+          setScreenshotStatus(prev => {
+            const copy = { ...prev };
+            delete copy[data.deviceId];
+            return copy;
+          });
+        });
+
+        fetchRecordings();
+        fetchScreenshots();
+        return () => { socket.disconnect(); };
+      }, [fetchRecordings, fetchScreenshots]);
+
+      // Clean up timer intervals on unmount
+      useEffect(() => {
+        return () => {
+          Object.values(timerIntervalsRef.current).forEach(clearInterval);
+        };
+      }, []);
+
+      // Toggle device selection
+      const toggleDevice = (deviceId) => {
+        setSelectedDevices(prev =>
+          prev.includes(deviceId)
+            ? prev.filter(id => id !== deviceId)
+            : [...prev, deviceId]
+        );
+      };
+
+      const selectAll = () => {
+        const onlineIds = onlineDevices.map(d => d.deviceId);
+        const allSelected = onlineIds.every(id => selectedDevices.includes(id));
+        setSelectedDevices(allSelected ? [] : onlineIds);
+      };
+
+      // Start countdown timer for a device
+      const startTimer = (deviceId, durationSec) => {
+        if (timerIntervalsRef.current[deviceId]) clearInterval(timerIntervalsRef.current[deviceId]);
+        setTimers(prev => ({ ...prev, [deviceId]: durationSec }));
+        timerIntervalsRef.current[deviceId] = setInterval(() => {
+          setTimers(prev => {
+            const remaining = (prev[deviceId] || 0) - 1;
+            if (remaining <= 0) {
+              clearInterval(timerIntervalsRef.current[deviceId]);
+              delete timerIntervalsRef.current[deviceId];
+              const copy = { ...prev };
+              delete copy[deviceId];
+              return copy;
+            }
+            return { ...prev, [deviceId]: remaining };
+          });
+        }, 1000);
+      };
+
+      const clearTimer = (deviceId) => {
+        if (timerIntervalsRef.current[deviceId]) {
+          clearInterval(timerIntervalsRef.current[deviceId]);
+          delete timerIntervalsRef.current[deviceId];
+        }
+        setTimers(prev => {
+          const copy = { ...prev };
+          delete copy[deviceId];
+          return copy;
+        });
+      };
+
+      // Record on specific device
+      const handleRecordDevice = (deviceId) => {
+        setError('');
+        socketRef.current.emit('start_recording', {
+          targetDeviceId: deviceId,
+          duration: selectedDuration
+        });
+        startTimer(deviceId, selectedDuration);
+      };
+
+      // Record on selected devices
+      const handleRecordSelected = () => {
+        if (selectedDevices.length === 0) return;
+        setError('');
+        selectedDevices.forEach(id => {
+          const dev = devices[id];
+          if (dev && dev.isOnline && !dev.isRecording) {
+            socketRef.current.emit('start_recording', {
+              targetDeviceId: id,
+              duration: selectedDuration
+            });
+            startTimer(id, selectedDuration);
+          }
+        });
+      };
+
+      // Record all online
+      const handleRecordAll = () => {
+        setError('');
+        onlineDevices.forEach(dev => {
+          if (!dev.isRecording) {
+            socketRef.current.emit('start_recording', {
+              targetDeviceId: dev.deviceId,
+              duration: selectedDuration
+            });
+            startTimer(dev.deviceId, selectedDuration);
+          }
+        });
+      };
+
+      // Stop specific device
+      const handleStopDevice = (deviceId) => {
+        socketRef.current.emit('stop_recording', { targetDeviceId: deviceId });
+        clearTimer(deviceId);
+      };
+
+      // Stop all
+      const handleStopAll = () => {
+        socketRef.current.emit('stop_recording', { targetDeviceId: 'all' });
+        Object.keys(timerIntervalsRef.current).forEach(clearTimer);
+      };
+
+      // Rename device
+      const handleRename = (deviceId) => {
+        if (!editName.trim()) return;
+        socketRef.current.emit('update_device_name', {
+          targetDeviceId: deviceId,
+          newName: editName.trim()
+        });
+        setEditingDevice(null);
+        setEditName('');
+      };
+
+      // Delete recording
+      const handleDelete = async (deviceId, filename) => {
+        if (!confirm('Delete this recording?')) return;
+        try {
+          const res = await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+          if (res.ok) fetchRecordings();
+          else setError('Failed to delete recording');
+        } catch (err) {
+          setError('Failed to delete recording');
+        }
+      };
+
+      // Take screenshot
+      const handleTakeScreenshot = (deviceId) => {
+        setScreenshotStatus(prev => ({ ...prev, [deviceId]: { status: 'requesting' } }));
+        socketRef.current.emit('take_screenshot', { targetDeviceId: deviceId });
+      };
+
+      const handleTakeScreenshotAll = () => {
+        onlineDevices.forEach(dev => handleTakeScreenshot(dev.deviceId));
+      };
+
+      // Delete screenshot
+      const handleDeleteScreenshot = async (deviceId, filename) => {
+        if (!confirm('Delete this screenshot?')) return;
+        try {
+          const res = await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+          if (res.ok) fetchScreenshots();
+          else setError('Failed to delete screenshot');
+        } catch (err) {
+          setError('Failed to delete screenshot');
+        }
+      };
+
+      // Get device status text
+      const getStatusText = (dev) => {
+        if (dev.isRecording) return 'Recording...';
+        if (dev.isOnline) return 'Online';
+        return `Offline (${timeAgo(dev.lastSeen)})`;
+      };
+
+      const getStatusColor = (dev) => {
+        if (dev.isRecording) return '#E57373';
+        if (dev.isOnline) return '#6BBF59';
+        return '#CCC';
+      };
+
+      // Compute total recordings count
+      const totalRecordings = Object.values(recordings).reduce(
+        (sum, g) => sum + (g.recordings ? g.recordings.length : 0), 0
+      );
+
+      const totalScreenshots = Object.values(screenshots).reduce(
+        (sum, g) => sum + (g.screenshots ? g.screenshots.length : 0), 0
+      );
+
+      // Filtered recordings
+      const filteredRecordings = filterDevice === 'all'
+        ? recordings
+        : (recordings[filterDevice] ? { [filterDevice]: recordings[filterDevice] } : {});
+
+      const anyRecording = deviceList.some(d => d.isRecording);
+      const selectedOnlineNotRecording = selectedDevices.filter(
+        id => devices[id] && devices[id].isOnline && !devices[id].isRecording
+      );
+
+      return (
+        <div style={{ maxWidth: 700, margin: '0 auto', padding: '20px 16px', minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 0', borderBottom: '1px solid #E0E0E0', marginBottom: 24 }}>
+            <span style={{ fontSize: 24, fontWeight: 600 }}>Baby Monitor</span>
+            <span style={{ fontSize: 13, color: '#666' }}>
+              {onlineCount} device{onlineCount !== 1 ? 's' : ''} online
+            </span>
+          </div>
+
+          {/* Error Banner */}
+          {error && (
+            <div style={{ background: '#FFF3F3', border: '1px solid #E57373', color: '#C62828', padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 13, cursor: 'pointer' }} onClick={() => setError('')}>
+              {error}
+              <span style={{ float: 'right', fontWeight: 700 }}>&times;</span>
+            </div>
+          )}
+
+          {/* Devices Section */}
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <div style={{ fontSize: 18, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                Devices
+                {deviceList.length > 0 && (
+                  <span style={{ background: '#4A90A4', color: '#FFF', fontSize: 12, padding: '2px 8px', borderRadius: 10 }}>{deviceList.length}</span>
+                )}
+              </div>
+              {onlineCount > 1 && (
+                <button onClick={selectAll} style={{ background: 'none', border: '1px solid #4A90A4', color: '#4A90A4', borderRadius: 6, padding: '4px 12px', fontSize: 12, cursor: 'pointer' }}>
+                  {onlineDevices.every(d => selectedDevices.includes(d.deviceId)) ? 'Deselect All' : 'Select All'}
+                </button>
+              )}
+            </div>
+
+            {deviceList.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '32px 0', color: '#999', fontSize: 15 }}>No devices registered yet</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {deviceList.map(dev => {
+                  const isSelected = selectedDevices.includes(dev.deviceId);
+                  const timer = timers[dev.deviceId];
+                  return (
+                    <div key={dev.deviceId}
+                      onClick={() => dev.isOnline && toggleDevice(dev.deviceId)}
+                      style={{
+                        background: '#FFF',
+                        borderRadius: 10,
+                        padding: 14,
+                        border: isSelected ? '2px solid #4A90A4' : '1px solid #F0F0F0',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+                        cursor: dev.isOnline ? 'pointer' : 'default',
+                        opacity: dev.isOnline ? 1 : 0.6,
+                        transition: 'all 0.2s ease',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
+                          <span style={{ width: 10, height: 10, borderRadius: '50%', background: getStatusColor(dev), display: 'inline-block', flexShrink: 0 }}
+                            className={dev.isRecording ? 'pulse' : dev.isOnline ? 'dot-pulse' : ''} />
+                          <div style={{ flex: 1 }}>
+                            {editingDevice === dev.deviceId ? (
+                              <div style={{ display: 'flex', gap: 6 }} onClick={e => e.stopPropagation()}>
+                                <input
+                                  value={editName}
+                                  onChange={e => setEditName(e.target.value)}
+                                  onKeyDown={e => e.key === 'Enter' && handleRename(dev.deviceId)}
+                                  autoFocus
+                                  style={{ fontSize: 14, padding: '4px 8px', borderRadius: 6, border: '1px solid #DDD', flex: 1 }}
+                                />
+                                <button onClick={() => handleRename(dev.deviceId)} style={{ background: '#4A90A4', color: '#FFF', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer' }}>Save</button>
+                                <button onClick={() => setEditingDevice(null)} style={{ background: 'none', border: '1px solid #CCC', borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer' }}>Cancel</button>
+                              </div>
+                            ) : (
+                              <div>
+                                <span style={{ fontSize: 15, fontWeight: 500 }}>{dev.deviceName}</span>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setEditingDevice(dev.deviceId); setEditName(dev.deviceName); }}
+                                  style={{ background: 'none', border: 'none', color: '#999', fontSize: 12, cursor: 'pointer', marginLeft: 6 }}
+                                  title="Rename"
+                                >&#9998;</button>
+                              </div>
+                            )}
+                            <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>
+                              {dev.model}{dev.manufacturer ? ` / ${dev.manufacturer}` : ''}
+                              {dev.androidVersion ? ` / Android ${dev.androidVersion}` : ''}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} onClick={e => e.stopPropagation()}>
+                          <span style={{ fontSize: 12, color: getStatusColor(dev), fontWeight: 500 }}
+                            className={dev.isRecording ? 'pulse' : ''}>
+                            {getStatusText(dev)}
+                            {timer !== undefined && ` (${formatTime(timer)})`}
+                          </span>
+                          {dev.isOnline && !dev.isRecording && (
+                            <button onClick={() => handleRecordDevice(dev.deviceId)}
+                              style={{ background: '#4A90A4', color: '#FFF', border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer' }}>
+                              Record
+                            </button>
+                          )}
+                          {dev.isOnline && (
+                            <button onClick={() => handleTakeScreenshot(dev.deviceId)}
+                              disabled={screenshotStatus[dev.deviceId]?.status === 'requesting' || screenshotStatus[dev.deviceId]?.status === 'capturing'}
+                              style={{
+                                background: screenshotStatus[dev.deviceId]?.status === 'requesting' ? '#CCC' : '#7B68AE',
+                                color: '#FFF', border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer'
+                              }}>
+                              {screenshotStatus[dev.deviceId]?.status === 'requesting' ? 'Capturing...' : 'Screenshot'}
+                            </button>
+                          )}
+                          {dev.isRecording && (
+                            <button onClick={() => handleStopDevice(dev.deviceId)}
+                              style={{ background: 'none', border: '1px solid #E57373', color: '#E57373', borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer' }}>
+                              Stop
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Controls */}
+          <div style={{ textAlign: 'center', padding: '24px 0', marginBottom: 24, background: '#FFF', borderRadius: 10, border: '1px solid #F0F0F0' }}>
+            <div style={{ marginBottom: 16 }}>
+              <select
+                value={selectedDuration}
+                onChange={(e) => setSelectedDuration(Number(e.target.value))}
+                style={{ padding: '10px 16px', fontSize: 15, borderRadius: 8, border: '1px solid #DDD', background: '#FFF', color: '#333', cursor: 'pointer', minWidth: 200 }}
+              >
+                {durationOptions.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap' }}>
+              {selectedDevices.length > 0 && (
+                <button
+                  onClick={handleRecordSelected}
+                  disabled={selectedOnlineNotRecording.length === 0}
+                  style={{
+                    padding: '12px 28px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, cursor: selectedOnlineNotRecording.length > 0 ? 'pointer' : 'not-allowed',
+                    color: '#FFF', background: selectedOnlineNotRecording.length > 0 ? '#4A90A4' : '#CCC'
+                  }}
+                >
+                  Record Selected ({selectedDevices.length})
+                </button>
+              )}
+              <button
+                onClick={handleRecordAll}
+                disabled={onlineCount === 0}
+                style={{
+                  padding: '12px 28px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10,
+                  cursor: onlineCount > 0 ? 'pointer' : 'not-allowed',
+                  color: '#FFF', background: onlineCount > 0 ? '#4A90A4' : '#CCC'
+                }}
+              >
+                {onlineCount === 0 ? 'No Devices Online' : `Record All (${onlineCount})`}
+              </button>
+              <button
+                onClick={handleTakeScreenshotAll}
+                disabled={onlineCount === 0}
+                style={{
+                  padding: '12px 28px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10,
+                  cursor: onlineCount > 0 ? 'pointer' : 'not-allowed',
+                  color: '#FFF', background: onlineCount > 0 ? '#7B68AE' : '#CCC'
+                }}
+              >
+                Screenshot All
+              </button>
+              {anyRecording && (
+                <button onClick={handleStopAll}
+                  style={{ padding: '12px 28px', fontSize: 15, fontWeight: 500, border: '2px solid #E57373', borderRadius: 10, cursor: 'pointer', color: '#E57373', background: 'transparent' }}>
+                  Stop All
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '2px solid #E0E0E0' }}>
+              <button onClick={() => setActiveTab('recordings')}
+                style={{
+                  padding: '10px 20px', fontSize: 15, fontWeight: 600, border: 'none', background: 'none', cursor: 'pointer',
+                  color: activeTab === 'recordings' ? '#4A90A4' : '#999',
+                  borderBottom: activeTab === 'recordings' ? '2px solid #4A90A4' : '2px solid transparent',
+                  marginBottom: -2
+                }}>
+                Recordings {totalRecordings > 0 && <span style={{ background: '#4A90A4', color: '#FFF', fontSize: 11, padding: '1px 7px', borderRadius: 10, marginLeft: 6 }}>{totalRecordings}</span>}
+              </button>
+              <button onClick={() => setActiveTab('screenshots')}
+                style={{
+                  padding: '10px 20px', fontSize: 15, fontWeight: 600, border: 'none', background: 'none', cursor: 'pointer',
+                  color: activeTab === 'screenshots' ? '#7B68AE' : '#999',
+                  borderBottom: activeTab === 'screenshots' ? '2px solid #7B68AE' : '2px solid transparent',
+                  marginBottom: -2
+                }}>
+                Screenshots {totalScreenshots > 0 && <span style={{ background: '#7B68AE', color: '#FFF', fontSize: 11, padding: '1px 7px', borderRadius: 10, marginLeft: 6 }}>{totalScreenshots}</span>}
+              </button>
+            </div>
+
+            {activeTab === 'recordings' && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                  <select
+                    value={filterDevice}
+                    onChange={e => setFilterDevice(e.target.value)}
+                    style={{ padding: '6px 12px', fontSize: 13, borderRadius: 6, border: '1px solid #DDD', background: '#FFF' }}
+                  >
+                    <option value="all">All Devices</option>
+                    {Object.entries(recordings).map(([id, group]) => (
+                      <option key={id} value={id}>{group.deviceName} ({group.recordings.length})</option>
+                    ))}
+                  </select>
+                </div>
+
+                {Object.keys(filteredRecordings).length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '48px 0', color: '#999', fontSize: 15 }}>No recordings yet</div>
+                ) : (
+                  Object.entries(filteredRecordings).map(([deviceId, group]) => (
+                    <div key={deviceId} style={{ marginBottom: 24 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: '#666', marginBottom: 10, paddingBottom: 6, borderBottom: '1px solid #EEE' }}>
+                        {group.deviceName}
+                        <span style={{ fontWeight: 400, color: '#999', marginLeft: 8 }}>({group.recordings.length})</span>
+                      </div>
+                      {group.recordings.map(rec => (
+                        <div key={rec.filename} style={{ background: '#FFF', borderRadius: 10, padding: 14, marginBottom: 10, boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #F0F0F0' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                            <span style={{ fontSize: 14, fontWeight: 500, wordBreak: 'break-all' }}>{rec.filename}</span>
+                            <span style={{ fontSize: 12, color: '#999', flexShrink: 0, marginLeft: 8 }}>{formatSize(rec.size)}</span>
+                          </div>
+                          <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>{formatDate(rec.created)}</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <audio controls preload="none" style={{ flex: 1, height: 40 }}>
+                              <source src={rec.url} />
+                            </audio>
+                            <button
+                              onClick={() => handleDelete(deviceId, rec.filename)}
+                              style={{ background: 'none', border: '1px solid #E57373', color: '#E57373', borderRadius: 8, padding: '6px 12px', fontSize: 13, cursor: 'pointer', flexShrink: 0 }}
+                            >Delete</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {activeTab === 'screenshots' && (
+              <div>
+                {Object.keys(screenshots).length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '48px 0', color: '#999', fontSize: 15 }}>No screenshots yet</div>
+                ) : (
+                  Object.entries(screenshots).map(([deviceId, group]) => (
+                    <div key={deviceId} style={{ marginBottom: 24 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: '#666', marginBottom: 10, paddingBottom: 6, borderBottom: '1px solid #EEE' }}>
+                        {group.deviceName}
+                        <span style={{ fontWeight: 400, color: '#999', marginLeft: 8 }}>({group.screenshots.length})</span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10 }}>
+                        {group.screenshots.map(shot => (
+                          <div key={shot.filename} style={{ background: '#FFF', borderRadius: 10, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #F0F0F0' }}>
+                            <img
+                              src={shot.url}
+                              alt={shot.filename}
+                              loading="lazy"
+                              onClick={() => setLightboxImg(shot.url)}
+                              style={{ width: '100%', height: 200, objectFit: 'cover', cursor: 'pointer', display: 'block' }}
+                            />
+                            <div style={{ padding: 8 }}>
+                              <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{formatDate(shot.created)}</div>
+                              <div style={{ fontSize: 11, color: '#999', marginBottom: 6 }}>{formatSize(shot.size)}</div>
+                              <button
+                                onClick={() => handleDeleteScreenshot(deviceId, shot.filename)}
+                                style={{ background: 'none', border: '1px solid #E57373', color: '#E57373', borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer', width: '100%' }}
+                              >Delete</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Lightbox */}
+          {lightboxImg && (
+            <div onClick={() => setLightboxImg(null)}
+              style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, cursor: 'pointer' }}>
+              <img src={lightboxImg} style={{ maxWidth: '95vw', maxHeight: '95vh', borderRadius: 8 }} />
+            </div>
+          )}
+
+          {/* Footer */}
+          <div style={{ marginTop: 'auto', padding: '16px 0', borderTop: '1px solid #E0E0E0', fontSize: 12, color: '#999', textAlign: 'center' }}>
+            Vantus Baby Monitor
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
