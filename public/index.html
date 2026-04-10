@@ -641,6 +641,8 @@
     const [toast,           setToast]           = useState(null);
     const [connected,       setConnected]       = useState(false);
     const [audioTesting,    setAudioTesting]    = useState({});
+    const [apkInfo,         setApkInfo]         = useState(null);
+    const [apkUploading,    setApkUploading]    = useState(false);
 
     const socketRef   = useRef(null);
     const timerRefs   = useRef({});
@@ -658,6 +660,7 @@
 
     const fetchRec  = useCallback(async () => { try { setRecordings(await (await fetch('/recordings')).json()); } catch(e){} }, []);
     const fetchShot = useCallback(async () => { try { setScreenshots(await (await fetch('/api/screenshots')).json()); } catch(e){} }, []);
+    const fetchApk  = useCallback(async () => { try { setApkInfo(await (await fetch('/api/apk/info')).json()); } catch(e){} }, []);
 
     /* Socket setup */
     useEffect(() => {
@@ -731,8 +734,9 @@
 
       fetchRec();
       fetchShot();
+      fetchApk();
       return () => { socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
-    }, [fetchRec, fetchShot, showToast]);
+    }, [fetchRec, fetchShot, fetchApk, showToast]);
 
     /* Timer helpers */
     const startTimer = useCallback((id, sec) => {
@@ -787,6 +791,25 @@
       socketRef.current.emit('test_audio_sources', { targetDeviceId: deviceId });
     };
 
+    const uploadApk = async (file) => {
+      setApkUploading(true);
+      try {
+        const fd = new FormData();
+        fd.append('apk', file);
+        const r = await fetch('/api/apk/upload', { method:'POST', body:fd });
+        if (r.ok) {
+          showToast('APK uploaded successfully', 'info');
+          fetchApk();
+        } else {
+          const d = await r.json();
+          showToast(`APK upload failed: ${d.error}`, 'error');
+        }
+      } catch(e) {
+        showToast('APK upload failed', 'error');
+      }
+      setApkUploading(false);
+    };
+
     const delRec  = async (deviceId, filename) => {
       if (!confirm('Delete this recording?')) return;
       await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
@@ -827,11 +850,20 @@
                 : 'Connecting…'}
             </div>
           </div>
-          <span style={{
-            width:10, height:10, borderRadius:'50%',
-            background: connected ? '#38A169' : '#ECC94B',
-            display:'inline-block', boxShadow:`0 0 0 3px ${connected?'#38A16944':'#ECC94B44'}`,
-          }} className={connected?'':'blink'} />
+          <div style={{display:'flex', alignItems:'center', gap:10}}>
+            {apkInfo?.available && (
+              <a href="/api/apk/download" style={{
+                fontSize:12, fontWeight:600, color:'#38A169', background:'#F0FFF4',
+                padding:'5px 12px', borderRadius:8, textDecoration:'none',
+                border:'1px solid #C6F6D5', whiteSpace:'nowrap',
+              }}>⬇ Get App</a>
+            )}
+            <span style={{
+              width:10, height:10, borderRadius:'50%',
+              background: connected ? '#38A169' : '#ECC94B',
+              display:'inline-block', boxShadow:`0 0 0 3px ${connected?'#38A16944':'#ECC94B44'}`,
+            }} className={connected?'':'blink'} />
+          </div>
         </div>
 
         {/* ── Tabs ──────────────────────────────────────────── */}
@@ -859,6 +891,9 @@
               <span style={{marginLeft:5,fontSize:10,background:'#7B68AE',color:'#FFF',
                             padding:'1px 6px',borderRadius:10}}>{totalShots}</span>
             )}
+          </button>
+          <button style={tabStyle(tab==='app','#DD6B20')} onClick={()=>setTab('app')}>
+            App
           </button>
         </div>
 
@@ -909,6 +944,66 @@
               : Object.entries(screenshots).map(([id, g]) => (
                   <ShotGroup key={id} deviceId={id} group={g} onDelete={delShot} onLightbox={setLightbox} />
                 ))
+          )}
+
+          {/* APP MANAGEMENT */}
+          {tab === 'app' && (
+            <div>
+              <Card style={{padding:20, marginBottom:16}}>
+                <div style={{fontSize:16, fontWeight:700, color:'#2D3748', marginBottom:4}}>
+                  Download Android App
+                </div>
+                <div style={{fontSize:13, color:'#718096', marginBottom:16}}>
+                  Install the Baby Monitor app on your Android phone to enable remote recording and screenshots.
+                </div>
+
+                {apkInfo?.available ? (
+                  <div>
+                    <a href="/api/apk/download" style={{textDecoration:'none', display:'block'}}>
+                      <Btn full color="#38A169">
+                        ⬇ Download APK ({fmtSize(apkInfo.size)})
+                      </Btn>
+                    </a>
+                    <div style={{fontSize:11, color:'#A0AEC0', marginTop:8, textAlign:'center'}}>
+                      Last updated: {fmtDate(apkInfo.updatedAt)}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{textAlign:'center', padding:'20px 0', color:'#A0AEC0', fontSize:13}}>
+                    No APK uploaded yet
+                  </div>
+                )}
+              </Card>
+
+              <Card style={{padding:20}}>
+                <div style={{fontSize:16, fontWeight:700, color:'#2D3748', marginBottom:4}}>
+                  Upload New APK
+                </div>
+                <div style={{fontSize:13, color:'#718096', marginBottom:16}}>
+                  Upload a new version of the Android app. This replaces the current download.
+                </div>
+                <label style={{
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                  height:100, borderRadius:12, cursor: apkUploading ? 'wait' : 'pointer',
+                  border:'2px dashed #CBD5E0', background:'#F7FAFC',
+                  color: apkUploading ? '#A0AEC0' : '#4A90A4',
+                  fontSize:14, fontWeight:600,
+                  transition:'border-color .2s',
+                }}>
+                  <input
+                    type="file"
+                    accept=".apk"
+                    style={{display:'none'}}
+                    disabled={apkUploading}
+                    onChange={e => {
+                      if (e.target.files[0]) uploadApk(e.target.files[0]);
+                      e.target.value = '';
+                    }}
+                  />
+                  {apkUploading ? '⏳ Uploading…' : '📦 Tap to select APK file'}
+                </label>
+              </Card>
+            </div>
           )}
         </div>
 

@@ -28,12 +28,16 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 3000;
 const RECORDINGS_DIR = path.join(__dirname, "recordings");
 const SCREENSHOTS_DIR = path.join(__dirname, "screenshots");
+const APK_DIR = path.join(__dirname, "apk");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 }
 if (!fs.existsSync(SCREENSHOTS_DIR)) {
   fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+}
+if (!fs.existsSync(APK_DIR)) {
+  fs.mkdirSync(APK_DIR, { recursive: true });
 }
 
 // Middleware
@@ -701,6 +705,71 @@ app.get("/api/devices/:deviceId/capabilities", (req, res) => {
   } else {
     res.status(404).json({ error: "Device not found" });
   }
+});
+
+// ─── APK MANAGEMENT ────────────────────────────────────────
+
+const APK_FILE = "app-debug.apk";
+
+// Upload APK (replaces existing)
+const apkUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, APK_DIR),
+    filename: (req, file, cb) => cb(null, APK_FILE),
+  }),
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB max
+  fileFilter: (req, file, cb) => {
+    if (file.originalname.toLowerCase().endsWith(".apk")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only .apk files are allowed"));
+    }
+  },
+});
+
+app.post("/api/apk/upload", apkUpload.single("apk"), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No APK file provided" });
+    }
+    const stats = fs.statSync(path.join(APK_DIR, APK_FILE));
+    log(`APK uploaded: ${APK_FILE} (${stats.size} bytes)`);
+    return res.json({
+      success: true,
+      filename: APK_FILE,
+      size: stats.size,
+      uploadedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    log(`APK upload error: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Download APK
+app.get("/api/apk/download", (req, res) => {
+  const filePath = path.join(APK_DIR, APK_FILE);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "No APK available yet" });
+  }
+  res.setHeader("Content-Disposition", `attachment; filename="${APK_FILE}"`);
+  res.setHeader("Content-Type", "application/vnd.android.package-archive");
+  return res.sendFile(filePath);
+});
+
+// APK info (check if available + size + date)
+app.get("/api/apk/info", (req, res) => {
+  const filePath = path.join(APK_DIR, APK_FILE);
+  if (!fs.existsSync(filePath)) {
+    return res.json({ available: false });
+  }
+  const stats = fs.statSync(filePath);
+  return res.json({
+    available: true,
+    filename: APK_FILE,
+    size: stats.size,
+    updatedAt: stats.mtime.toISOString(),
+  });
 });
 
 // ─── SOCKET.IO ──────────────────────────────────────────────

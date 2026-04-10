@@ -1,8 +1,8 @@
 node_modules/
 recordings/
+screenshots/
+apk/
 .env
 ignore_directory
 .claude
 CLAUDE.md
-recordings
-screenshots
