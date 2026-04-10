@@ -196,10 +196,133 @@
     );
   }
 
+  /* ─── Audio Source Panel (expandable inside DeviceCard) ────── */
+  const AUDIO_SOURCES = ['CAMCORDER','VOICE_RECOGNITION','MIC','DEFAULT','VOICE_COMMUNICATION'];
+
+  function AudioPanel({dev, onSetSource, onTestSources, testing}) {
+    const cfg = dev.audioSourceConfig || {};
+    const results = cfg.testResults || {};
+    const hasResults = Object.keys(results).length > 0;
+
+    const resultIcon = (r) => {
+      if (!r) return '';
+      if (r === 'working') return '✅';
+      if (r === 'silent')  return '🔇';
+      return '❌';
+    };
+
+    const resultColor = (r) => {
+      if (r === 'working') return '#38A169';
+      if (r === 'silent')  return '#E53E3E';
+      if (r && r.startsWith('error')) return '#E53E3E';
+      return '#718096';
+    };
+
+    return (
+      <div style={{
+        padding:'12px 16px 14px', borderTop:'1px solid #F0F4F5',
+        background:'#FAFCFE',
+      }}>
+        {/* Current / Recommended row */}
+        <div style={{display:'flex', flexWrap:'wrap', gap:8, marginBottom:10}}>
+          {cfg.currentSource && (
+            <div style={{fontSize:12}}>
+              <span style={{color:'#718096'}}>Current: </span>
+              <span style={{fontWeight:700, color:'#2D3748'}}>{cfg.currentSource}</span>
+            </div>
+          )}
+          {cfg.autoDetectedSource && (
+            <div style={{
+              fontSize:12, background:'#F0FFF4', border:'1px solid #C6F6D5',
+              padding:'2px 8px', borderRadius:6,
+            }}>
+              <span style={{color:'#276749'}}>Recommended: </span>
+              <span style={{fontWeight:700, color:'#22543D'}}>{cfg.autoDetectedSource}</span>
+            </div>
+          )}
+          {cfg.userSelectedSource && cfg.userSelectedSource !== 'auto' && (
+            <div style={{
+              fontSize:12, background:'#FFFFF0', border:'1px solid #FEFCBF',
+              padding:'2px 8px', borderRadius:6,
+            }}>
+              <span style={{color:'#975A16'}}>Override: </span>
+              <span style={{fontWeight:700, color:'#744210'}}>{cfg.userSelectedSource}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Source selector */}
+        <div style={{display:'flex', gap:8, marginBottom:10, flexWrap:'wrap'}}>
+          <select
+            value={cfg.userSelectedSource || 'auto'}
+            onChange={e => onSetSource(dev.deviceId, e.target.value)}
+            style={{
+              flex:1, minWidth:0, height:38, padding:'0 10px', fontSize:13, fontWeight:500,
+              borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF',
+              color:'#2D3748', cursor:'pointer',
+            }}
+          >
+            <option value="auto">Auto (Recommended)</option>
+            {AUDIO_SOURCES.map(src => (
+              <option key={src} value={src}>
+                {src} {resultIcon(results[src])}
+              </option>
+            ))}
+          </select>
+          <Btn
+            sm color="#4A90A4" outline
+            onClick={()=>onTestSources(dev.deviceId)}
+            disabled={testing}
+          >
+            {testing ? '⏳ Testing…' : '🔊 Test'}
+          </Btn>
+          {cfg.userSelectedSource && cfg.userSelectedSource !== 'auto' && (
+            <Btn sm outline color="#718096" onClick={()=>onSetSource(dev.deviceId, 'auto')}>
+              ↩ Auto
+            </Btn>
+          )}
+        </div>
+
+        {/* Test results table */}
+        {hasResults && (
+          <div style={{borderRadius:8, overflow:'hidden', border:'1px solid #E2E8F0'}}>
+            {AUDIO_SOURCES.map((src, i) => {
+              const r = results[src];
+              if (!r) return null;
+              const isRec = src === cfg.autoDetectedSource;
+              return (
+                <div key={src} style={{
+                  display:'flex', alignItems:'center', gap:8,
+                  padding:'7px 10px', fontSize:12,
+                  background: isRec ? '#F0FFF4' : (i%2===0 ? '#FAFCFE' : '#FFF'),
+                  borderBottom: i < AUDIO_SOURCES.length-1 ? '1px solid #EDF2F7' : 'none',
+                }}>
+                  <span style={{flex:1, fontWeight:isRec?700:500, color:'#2D3748'}}>{src}</span>
+                  <span style={{color:resultColor(r), fontWeight:600}}>
+                    {resultIcon(r)} {r === 'working' ? 'Working' : r === 'silent' ? 'Silent' : r}
+                  </span>
+                  {isRec && <Pill color="#276749" bg="#C6F6D5">BEST</Pill>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Last test time */}
+        {cfg.lastTestTime && (
+          <div style={{fontSize:11, color:'#A0AEC0', marginTop:8}}>
+            Last tested: {fmtDate(cfg.lastTestTime)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   /* ─── Device Card ───────────────────────────────────────────── */
-  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, timer, ssStatus}) {
+  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, onSetAudioSource, onTestAudio, timer, ssStatus, audioTesting}) {
     const [editing, setEditing] = useState(false);
     const [name, setName]       = useState(dev.deviceName);
+    const [audioOpen, setAudioOpen] = useState(false);
     const color = devColor(dev.deviceId);
     const capturing = ssStatus?.status === 'requesting' || ssStatus?.status === 'capturing' || ssStatus?.status === 'uploading';
 
@@ -297,7 +420,20 @@
             {ssStatus?.status === 'uploading' && (
               <span style={{fontSize:11,color:'#7B68AE',alignSelf:'center'}}>uploading…</span>
             )}
+            <Btn sm outline color="#718096" onClick={()=>setAudioOpen(!audioOpen)}>
+              🎤 {audioOpen ? '▲' : 'Audio'}
+            </Btn>
           </div>
+        )}
+
+        {/* ── Audio source panel (collapsible) ── */}
+        {audioOpen && dev.isOnline && (
+          <AudioPanel
+            dev={dev}
+            onSetSource={onSetAudioSource}
+            onTestSources={onTestAudio}
+            testing={audioTesting}
+          />
         )}
       </Card>
     );
@@ -501,6 +637,7 @@
     const [lightbox,        setLightbox]        = useState(null);
     const [toast,           setToast]           = useState(null);
     const [connected,       setConnected]       = useState(false);
+    const [audioTesting,    setAudioTesting]    = useState({});
 
     const socketRef   = useRef(null);
     const timerRefs   = useRef({});
@@ -560,6 +697,35 @@
         showToast(`Upload failed: ${d.filename} (attempt ${d.failCount})`, 'warn')
       );
 
+      // Audio source events
+      socket.on('audio_source_test_started', d => {
+        setAudioTesting(p => ({ ...p, [d.deviceId]: true }));
+        showToast(`Testing audio sources on ${d.deviceName||d.deviceId}…`, 'info');
+      });
+      socket.on('audio_source_test_complete', d => {
+        setAudioTesting(p => { const c={...p}; delete c[d.deviceId]; return c; });
+        showToast(`Audio test done on ${d.deviceName||d.deviceId}: best = ${d.autoDetectedSource}`, 'info');
+      });
+      socket.on('audio_source_updated', d => {
+        showToast(`Audio source on ${d.deviceName||d.deviceId} set to ${d.selectedSource}`, 'info');
+      });
+      socket.on('audio_source_working', d => {
+        // silent — just data update via devices_update
+      });
+      socket.on('audio_config', () => {
+        // config update comes via devices_update broadcast
+      });
+      socket.on('recording_interrupted', d => {
+        showToast(`Recording interrupted on ${d.deviceName||d.deviceId}: ${d.message||d.reason}`, 'warn');
+      });
+      socket.on('partial_recording_saved', d => {
+        showToast(`Partial recording saved: ${d.filename}`, 'info');
+        fetchRec();
+      });
+      socket.on('recording_retry', d => {
+        showToast(`Retrying recording on ${d.deviceName||d.deviceId}…`, 'info');
+      });
+
       fetchRec();
       fetchShot();
       return () => { socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
@@ -609,6 +775,14 @@
       Object.keys(timerRefs.current).forEach(stopTimer);
     };
     const shotAll   = () => onlineDev.forEach(d=>shot(d.deviceId));
+
+    const setAudioSource = (deviceId, source) => {
+      socketRef.current.emit('set_audio_source', { targetDeviceId: deviceId, source });
+    };
+    const testAudio = (deviceId) => {
+      setAudioTesting(p => ({ ...p, [deviceId]: true }));
+      socketRef.current.emit('test_audio_sources', { targetDeviceId: deviceId });
+    };
 
     const delRec  = async (deviceId, filename) => {
       if (!confirm('Delete this recording?')) return;
@@ -707,8 +881,11 @@
                     onStop={stop}
                     onScreenshot={shot}
                     onRename={rename}
+                    onSetAudioSource={setAudioSource}
+                    onTestAudio={testAudio}
                     timer={timers[dev.deviceId]}
                     ssStatus={ssStatus[dev.deviceId]}
+                    audioTesting={!!audioTesting[dev.deviceId]}
                   />
                 ))
           )}

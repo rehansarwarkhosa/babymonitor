@@ -641,6 +641,50 @@ app.get("/api/devices/queue-status", (req, res) => {
   res.json(statuses);
 });
 
+// Get audio config for a device
+app.get("/api/devices/:deviceId/audio-config", (req, res) => {
+  const dev = devices.get(req.params.deviceId);
+  if (dev) {
+    res.json({
+      deviceId: dev.deviceId,
+      deviceName: dev.deviceName,
+      audioSourceConfig: dev.audioSourceConfig || {},
+      manufacturer: dev.manufacturer,
+      model: dev.model,
+    });
+  } else {
+    res.status(404).json({ error: "Device not found" });
+  }
+});
+
+// Set audio source for a device
+app.post("/api/devices/:deviceId/audio-source", (req, res) => {
+  const { source } = req.body;
+  const dev = devices.get(req.params.deviceId);
+  if (dev && dev.isOnline && dev.socketId) {
+    io.to(dev.socketId).emit("set_audio_source", {
+      targetDeviceId: req.params.deviceId,
+      source,
+    });
+    res.json({ success: true, message: `Audio source set to ${source}` });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
+// Request audio source test for a device
+app.post("/api/devices/:deviceId/test-audio", (req, res) => {
+  const dev = devices.get(req.params.deviceId);
+  if (dev && dev.isOnline && dev.socketId) {
+    io.to(dev.socketId).emit("test_audio_sources", {
+      targetDeviceId: req.params.deviceId,
+    });
+    res.json({ success: true, message: "Audio test started" });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
 // Get device capabilities
 app.get("/api/devices/:deviceId/capabilities", (req, res) => {
   const dev = devices.get(req.params.deviceId);
@@ -917,6 +961,173 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ─── Audio source events from Android ─────────────────────
+
+  socket.on("audio_source_test_started", (data) => {
+    try {
+      log(`Audio source test started on ${(data && data.deviceName) || "unknown"}`);
+      io.emit("audio_source_test_started", data);
+    } catch (e) {
+      log(`Error in audio_source_test_started: ${e.message}`);
+    }
+  });
+
+  socket.on("audio_source_test_complete", (data) => {
+    try {
+      const deviceId = data && data.deviceId;
+      log(`Audio source test complete on ${(data && data.deviceName) || "unknown"} — auto-detected: ${data && data.autoDetectedSource}`);
+      if (deviceId && devices.has(deviceId)) {
+        const dev = devices.get(deviceId);
+        dev.audioSourceConfig = {
+          ...(dev.audioSourceConfig || {}),
+          testResults: data.testResults,
+          autoDetectedSource: data.autoDetectedSource,
+          currentSource: data.currentSource,
+          hasTestedSources: true,
+          lastTestTime: Date.now(),
+        };
+      }
+      io.emit("audio_source_test_complete", data);
+      broadcastDevices();
+    } catch (e) {
+      log(`Error in audio_source_test_complete: ${e.message}`);
+    }
+  });
+
+  socket.on("audio_source_updated", (data) => {
+    try {
+      const deviceId = data && data.deviceId;
+      log(`Audio source updated on ${(data && data.deviceName) || "unknown"}: ${data && data.selectedSource}`);
+      if (deviceId && devices.has(deviceId)) {
+        const dev = devices.get(deviceId);
+        dev.audioSourceConfig = {
+          ...(dev.audioSourceConfig || {}),
+          userSelectedSource: data.selectedSource,
+          autoDetectedSource: data.autoDetectedSource,
+          currentSource: data.selectedSource === "auto" ? data.autoDetectedSource : data.selectedSource,
+        };
+      }
+      io.emit("audio_source_updated", data);
+      broadcastDevices();
+    } catch (e) {
+      log(`Error in audio_source_updated: ${e.message}`);
+    }
+  });
+
+  socket.on("audio_source_working", (data) => {
+    try {
+      log(`Working audio source on ${(data && data.deviceName) || "unknown"}: ${data && data.workingSource}`);
+      if (data.deviceId && devices.has(data.deviceId)) {
+        const dev = devices.get(data.deviceId);
+        dev.audioSourceConfig = {
+          ...(dev.audioSourceConfig || {}),
+          currentSource: data.workingSource,
+        };
+      }
+      io.emit("audio_source_working", data);
+    } catch (e) {
+      log(`Error in audio_source_working: ${e.message}`);
+    }
+  });
+
+  socket.on("audio_config", (data) => {
+    try {
+      const deviceId = data && data.deviceId;
+      if (deviceId && devices.has(deviceId)) {
+        devices.get(deviceId).audioSourceConfig = data.config;
+      }
+      io.emit("audio_config", data);
+    } catch (e) {
+      log(`Error in audio_config: ${e.message}`);
+    }
+  });
+
+  socket.on("recording_interrupted", (data) => {
+    try {
+      log(`Recording interrupted on ${(data && data.deviceName) || "unknown"}: ${(data && data.message) || data.reason}`);
+      if (data.deviceId && devices.has(data.deviceId)) {
+        devices.get(data.deviceId).isRecording = false;
+        broadcastDevices();
+      }
+      io.emit("recording_interrupted", data);
+    } catch (e) {
+      log(`Error in recording_interrupted: ${e.message}`);
+    }
+  });
+
+  socket.on("partial_recording_saved", (data) => {
+    try {
+      log(`Partial recording saved from ${(data && data.deviceName) || "unknown"}: ${data && data.filename}`);
+      io.emit("partial_recording_saved", data);
+    } catch (e) {
+      log(`Error in partial_recording_saved: ${e.message}`);
+    }
+  });
+
+  socket.on("recording_retry", (data) => {
+    try {
+      log(`Recording retry on ${(data && data.deviceName) || "unknown"}`);
+      if (data.deviceId && devices.has(data.deviceId)) {
+        devices.get(data.deviceId).isRecording = true;
+        broadcastDevices();
+      }
+      io.emit("recording_retry", data);
+    } catch (e) {
+      log(`Error in recording_retry: ${e.message}`);
+    }
+  });
+
+  // ─── Audio source commands TO Android ───────────────────
+
+  socket.on("set_audio_source", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const source = data && data.source;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("set_audio_source", { targetDeviceId: targetId, source });
+        log(`Set audio source on ${dev.deviceName} (${targetId}): ${source}`);
+      }
+    } catch (e) {
+      log(`Error in set_audio_source: ${e.message}`);
+    }
+  });
+
+  socket.on("test_audio_sources", (data) => {
+    try {
+      const targetId = (data && data.targetDeviceId) || "all";
+      if (targetId === "all") {
+        devices.forEach((dev) => {
+          if (dev.isOnline && dev.socketId) {
+            io.to(dev.socketId).emit("test_audio_sources", { targetDeviceId: dev.deviceId });
+            log(`Test audio sources sent to ${dev.deviceName} (${dev.deviceId})`);
+          }
+        });
+      } else {
+        const dev = devices.get(targetId);
+        if (dev && dev.isOnline && dev.socketId) {
+          io.to(dev.socketId).emit("test_audio_sources", { targetDeviceId: targetId });
+          log(`Test audio sources sent to ${dev.deviceName} (${targetId})`);
+        }
+      }
+    } catch (e) {
+      log(`Error in test_audio_sources: ${e.message}`);
+    }
+  });
+
+  socket.on("get_audio_config", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("get_audio_config", { targetDeviceId: targetId });
+        log(`Get audio config sent to ${dev.deviceName} (${targetId})`);
+      }
+    } catch (e) {
+      log(`Error in get_audio_config: ${e.message}`);
+    }
+  });
+
   // Screenshot events from Android
   socket.on("take_screenshot", (data) => {
     try {
@@ -994,6 +1205,7 @@ io.on("connection", (socket) => {
         if (data.screenshotCapability) dev.screenshotCapability = data.screenshotCapability;
         if (data.isScreenLocked !== undefined) dev.isScreenLocked = data.isScreenLocked;
         if (data.uploadQueueStatus !== undefined) dev.uploadQueueStatus = data.uploadQueueStatus;
+        if (data.audioSourceConfig !== undefined) dev.audioSourceConfig = data.audioSourceConfig;
       }
       if (pendingPongs.has(socket.id)) {
         clearTimeout(pendingPongs.get(socket.id));
