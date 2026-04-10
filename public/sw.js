@@ -1,5 +1,5 @@
-const CACHE_NAME = 'baby-monitor-v1';
-const STATIC_ASSETS = ['/'];
+const CACHE_NAME = 'baby-monitor-v2';
+const STATIC_ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
