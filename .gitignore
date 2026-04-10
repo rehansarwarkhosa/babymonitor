@@ -1,7 +1,5 @@
 node_modules/
-recordings/*.mp3
-recordings/*.wav
-recordings/*.m4a
+recordings/
 .env
 ignore_directory
 .claude

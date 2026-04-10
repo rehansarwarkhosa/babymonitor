@@ -9,7 +9,13 @@ const fs = require("fs");
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+  maxHttpBufferSize: 500 * 1024 * 1024, // 500 MB for socket messages
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 const PORT = process.env.PORT || 3000;
@@ -25,7 +31,8 @@ if (!fs.existsSync(SCREENSHOTS_DIR)) {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ limit: '500mb', extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 app.set("etag", false);
 
@@ -39,7 +46,7 @@ const ALLOWED_EXTENSIONS = [
   ".3gp",
   ".aac",
 ];
-const MAX_FILE_SIZE = 100 * 1024 * 1024;
+const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 
 // Use memory storage temporarily, then save to correct folder
 const storage = multer.diskStorage({
