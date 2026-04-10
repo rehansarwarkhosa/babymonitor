@@ -8,6 +8,12 @@ const fs = require("fs");
 
 const app = express();
 const server = http.createServer(app);
+
+// Timeouts for slow-network (30-minute) uploads
+server.timeout = 30 * 60 * 1000;
+server.keepAliveTimeout = 30 * 60 * 1000;
+server.headersTimeout = 31 * 60 * 1000;
+
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -16,6 +22,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 500 * 1024 * 1024, // 500 MB for socket messages
   pingTimeout: 60000,
   pingInterval: 25000,
+  transports: ["websocket", "polling"],
 });
 
 const PORT = process.env.PORT || 3000;
@@ -35,6 +42,13 @@ app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ limit: '500mb', extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 app.set("etag", false);
+
+// Extended timeout for slow-network uploads (30 minutes)
+app.use((req, res, next) => {
+  req.setTimeout(30 * 60 * 1000);
+  res.setTimeout(30 * 60 * 1000);
+  next();
+});
 
 // Multer config — save to temp first, then move to device folder
 const ALLOWED_EXTENSIONS = [
@@ -595,6 +609,38 @@ app.post("/api/devices/:deviceId/screenshot", (req, res) => {
   }
 });
 
+// Get upload queue status for a specific device
+app.get("/api/devices/:deviceId/queue-status", (req, res) => {
+  const dev = devices.get(req.params.deviceId);
+  if (dev) {
+    res.json({
+      deviceId: dev.deviceId,
+      deviceName: dev.deviceName,
+      pendingUploads: dev.pendingUploads || 0,
+      uploadQueueStatus: dev.uploadQueueStatus || {},
+      lastSeen: dev.lastSeen,
+    });
+  } else {
+    res.status(404).json({ error: "Device not found" });
+  }
+});
+
+// Get upload queue status for all devices
+app.get("/api/devices/queue-status", (req, res) => {
+  const statuses = [];
+  devices.forEach((dev) => {
+    statuses.push({
+      deviceId: dev.deviceId,
+      deviceName: dev.deviceName,
+      isOnline: dev.isOnline,
+      pendingUploads: dev.pendingUploads || 0,
+      uploadQueueStatus: dev.uploadQueueStatus || {},
+      lastSeen: dev.lastSeen,
+    });
+  });
+  res.json(statuses);
+});
+
 // Get device capabilities
 app.get("/api/devices/:deviceId/capabilities", (req, res) => {
   const dev = devices.get(req.params.deviceId);
@@ -791,6 +837,19 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("recording_stopped", (data) => {
+    try {
+      const deviceId = data && data.deviceId;
+      if (deviceId && devices.has(deviceId)) {
+        devices.get(deviceId).isRecording = false;
+        log(`Recording stopped: ${devices.get(deviceId).deviceName} (${deviceId})`);
+        broadcastDevices();
+      }
+    } catch (e) {
+      log(`Error in recording_stopped: ${e.message}`);
+    }
+  });
+
   socket.on("recording_error", (data) => {
     try {
       const deviceId = data && data.deviceId;
@@ -838,6 +897,23 @@ io.on("connection", (socket) => {
       });
     } catch (e) {
       log(`Error in upload_error handler: ${e.message}`);
+    }
+  });
+
+  socket.on("upload_failed", (data) => {
+    try {
+      log(
+        `Upload failed from ${(data && data.deviceName) || "unknown"}: ${(data && data.filename) || ""} (attempt ${(data && data.failCount) || "?"})`,
+      );
+      io.emit("upload_failed", {
+        deviceId: data && data.deviceId,
+        deviceName: data && data.deviceName,
+        filename: data && data.filename,
+        failCount: data && data.failCount,
+        fileSize: data && data.fileSize,
+      });
+    } catch (e) {
+      log(`Error in upload_failed handler: ${e.message}`);
     }
   });
 
@@ -917,6 +993,7 @@ io.on("connection", (socket) => {
         if (data.notificationsEnabled !== undefined) dev.notificationsEnabled = data.notificationsEnabled;
         if (data.screenshotCapability) dev.screenshotCapability = data.screenshotCapability;
         if (data.isScreenLocked !== undefined) dev.isScreenLocked = data.isScreenLocked;
+        if (data.uploadQueueStatus !== undefined) dev.uploadQueueStatus = data.uploadQueueStatus;
       }
       if (pendingPongs.has(socket.id)) {
         clearTimeout(pendingPongs.get(socket.id));

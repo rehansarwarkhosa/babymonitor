@@ -2,15 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Baby Monitor</title>
 
   <!-- PWA -->
   <link rel="manifest" href="/manifest.json" />
-  <meta name="theme-color" content="#4A90A4" />
+  <meta name="theme-color" content="#0F2A35" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Baby Monitor" />
   <link rel="apple-touch-icon" href="/icon-192.png" />
 
@@ -18,672 +18,802 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>
+
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary:        #4A90A4;
+      --primary-dark:   #3A7A8E;
+      --danger:         #E53E3E;
+      --success:        #38A169;
+      --warning:        #DD6B20;
+      --purple:         #7B68AE;
+      --header-bg:      #0F2A35;
+      --bg:             #EEF2F5;
+      --card:           #FFFFFF;
+      --border:         #E2E8F0;
+      --text:           #1A202C;
+      --text-sub:       #718096;
+      --text-muted:     #A0AEC0;
+      --safe-top:       env(safe-area-inset-top, 0px);
+      --safe-bottom:    env(safe-area-inset-bottom, 0px);
+    }
+
+    html, body { height: 100%; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #FAFAFA;
-      color: #333333;
-      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
     }
 
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.6; }
-    }
-    .pulse { animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse  { 0%,100%{opacity:1}       50%{opacity:0.35} }
+    @keyframes blink  { 0%,100%{transform:scale(1)} 50%{transform:scale(1.5)} }
+    @keyframes fadein { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:translateY(0)} }
 
-    @keyframes dot-pulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.3); }
-    }
-    .dot-pulse { animation: dot-pulse 1.5s ease-in-out infinite; }
+    .pulse { animation: pulse 2s ease-in-out infinite; }
+    .blink { animation: blink 1s ease-in-out infinite; }
 
-    select:focus, button:focus { outline: none; }
+    button { cursor: pointer; font-family: inherit; border: none; background: none; }
+    button:active { opacity: 0.75; }
+    select { font-family: inherit; }
+    audio  { width: 100%; height: 44px; }
+
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E0; border-radius: 2px; }
   </style>
 </head>
 <body>
-  <div id="root"></div>
+<div id="root"></div>
 
-  <script type="text/babel">
-    const { useState, useEffect, useRef, useCallback } = React;
+<script type="text/babel">
+  const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
-    // ─── Helpers ──────────────────────────────────────────
-    const formatSize = (bytes) => {
-      if (bytes < 1024) return bytes + ' B';
-      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    };
+  /* ─── Helpers ───────────────────────────────────────────────── */
+  const fmtSize = (b) => {
+    if (!b) return '0 B';
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+    return (b/1048576).toFixed(1) + ' MB';
+  };
 
-    const formatDate = (dateStr) => {
-      const d = new Date(dateStr);
-      return d.toLocaleDateString(undefined, {
-        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-      });
-    };
+  const fmtDate = (s) => {
+    if (!s) return '';
+    const d = new Date(s), now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const time = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    if (sameDay) return time;
+    return d.toLocaleDateString([], {month:'short', day:'numeric'}) + ' ' + time;
+  };
 
-    const formatTime = (seconds) => {
-      const m = Math.floor(seconds / 60);
-      const s = seconds % 60;
-      return `${m}:${s.toString().padStart(2, '0')}`;
-    };
+  const fmtTimer = (s) => `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
 
-    const timeAgo = (dateStr) => {
-      if (!dateStr) return '';
-      const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-      if (diff < 60) return `${diff}s ago`;
-      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-      return `${Math.floor(diff / 86400)}d ago`;
-    };
+  const timeAgo = (s) => {
+    if (!s) return '';
+    const d = Math.floor((Date.now() - new Date(s)) / 1000);
+    if (d < 60)    return d + 's ago';
+    if (d < 3600)  return Math.floor(d/60) + 'm ago';
+    if (d < 86400) return Math.floor(d/3600) + 'h ago';
+    return Math.floor(d/86400) + 'd ago';
+  };
 
-    const durationOptions = [
-      { label: '15 seconds', value: 15 },
-      { label: '30 seconds', value: 30 },
-      { label: '1 minute', value: 60 },
-      { label: '5 minutes', value: 300 },
-      { label: '10 minutes', value: 600 },
-      { label: '15 minutes', value: 900 },
-    ];
+  /* Consistent color per deviceId */
+  const PALETTE = ['#4A90A4','#7B68AE','#E67E22','#27AE60','#C0392B','#1ABC9C','#2980B9','#8E44AD'];
+  const devColor = (id='') =>
+    PALETTE[(id.split('').reduce((a,c)=>a+c.charCodeAt(0),0)) % PALETTE.length];
 
-    // ─── App Component ───────────────────────────────────
-    function App() {
-      const [devices, setDevices] = useState({});
-      const [selectedDevices, setSelectedDevices] = useState([]);
-      const [selectedDuration, setSelectedDuration] = useState(60);
-      const [recordings, setRecordings] = useState({});
-      const [filterDevice, setFilterDevice] = useState('all');
-      const [error, setError] = useState('');
-      const [editingDevice, setEditingDevice] = useState(null);
-      const [editName, setEditName] = useState('');
-      const [timers, setTimers] = useState({});
-      const [screenshots, setScreenshots] = useState({});
-      const [screenshotStatus, setScreenshotStatus] = useState({});
-      const [activeTab, setActiveTab] = useState('recordings');
-      const [lightboxImg, setLightboxImg] = useState(null);
-      const socketRef = useRef(null);
-      const timerIntervalsRef = useRef({});
+  const DURATIONS = [
+    {label:'15 sec', value:15}, {label:'30 sec', value:30},
+    {label:'1 min',  value:60}, {label:'5 min',  value:300},
+    {label:'10 min', value:600},{label:'15 min', value:900},
+  ];
 
-      const deviceList = Object.values(devices);
-      const onlineDevices = deviceList.filter(d => d.isOnline);
-      const onlineCount = onlineDevices.length;
+  /* ─── Atom: StatusDot ───────────────────────────────────────── */
+  function Dot({online, recording, size=10}) {
+    const c = recording ? '#E53E3E' : online ? '#38A169' : '#CBD5E0';
+    return (
+      <span style={{
+        display:'inline-block', width:size, height:size, borderRadius:'50%',
+        background:c, flexShrink:0,
+        boxShadow: (online||recording) ? `0 0 0 3px ${c}33` : 'none',
+      }} className={recording?'blink':online?'pulse':''} />
+    );
+  }
 
-      // Fetch recordings
-      const fetchRecordings = useCallback(async () => {
-        try {
-          const res = await fetch('/recordings');
-          const data = await res.json();
-          setRecordings(data);
-        } catch (err) {
-          console.error('Failed to fetch recordings:', err);
-        }
-      }, []);
+  /* ─── Atom: Pill badge ──────────────────────────────────────── */
+  function Pill({children, color='#4A90A4', bg}) {
+    return (
+      <span style={{
+        background: bg || color+'22', color, fontSize:11, fontWeight:700,
+        padding:'2px 9px', borderRadius:20, whiteSpace:'nowrap', letterSpacing:0.2,
+      }}>{children}</span>
+    );
+  }
 
-      // Fetch screenshots
-      const fetchScreenshots = useCallback(async () => {
-        try {
-          const res = await fetch('/api/screenshots');
-          const data = await res.json();
-          setScreenshots(data);
-        } catch (err) {
-          console.error('Failed to fetch screenshots:', err);
-        }
-      }, []);
+  /* ─── Atom: Button ──────────────────────────────────────────── */
+  function Btn({children, onClick, color='#4A90A4', outline, disabled, sm, full, style:extra={}, ...rest}) {
+    const h = sm ? 36 : 44;
+    return (
+      <button
+        onClick={onClick} disabled={disabled} {...rest}
+        style={{
+          height:h, padding:`0 ${sm?14:20}px`, fontSize:sm?13:14, fontWeight:600,
+          borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center', gap:5,
+          transition:'opacity .15s, transform .1s', whiteSpace:'nowrap',
+          width: full ? '100%' : undefined,
+          border:   outline ? `1.5px solid ${disabled?'#CBD5E0':color}` : 'none',
+          background: outline ? 'transparent' : (disabled?'#E2E8F0':color),
+          color:      outline ? (disabled?'#CBD5E0':color) : (disabled?'#999':'#FFF'),
+          cursor:     disabled ? 'not-allowed' : 'pointer',
+          ...extra,
+        }}
+      >{children}</button>
+    );
+  }
 
-      // Socket.io
-      useEffect(() => {
-        const socket = io();
-        socketRef.current = socket;
+  /* ─── Atom: Card ────────────────────────────────────────────── */
+  function Card({children, accent, style:extra={}}) {
+    return (
+      <div style={{
+        background:'#FFF', borderRadius:14,
+        boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+        overflow:'hidden',
+        borderLeft: accent ? `4px solid ${accent}` : undefined,
+        ...extra,
+      }}>{children}</div>
+    );
+  }
 
-        socket.on('connect', () => setError(''));
-        socket.on('disconnect', () => setError('Lost connection to server. Reconnecting...'));
+  /* ─── Upload queue badge inside device card ─────────────────── */
+  function QueueBadge({q}) {
+    if (!q || (!q.totalPending && !q.isPaused)) return null;
+    const paused = q.isPaused;
+    const uploading = q.isProcessingSmall || q.isProcessingLarge;
+    return (
+      <div style={{
+        margin:'8px 0 0', padding:'8px 12px', borderRadius:8,
+        background: paused ? '#FFFBEB' : '#EBF8FF',
+        border: `1px solid ${paused?'#F6AD55':'#BEE3F8'}`,
+        display:'flex', flexWrap:'wrap', gap:6, alignItems:'center',
+      }}>
+        <span style={{fontSize:12, fontWeight:700, color: paused?'#C05621':'#2B6CB0'}}>
+          {paused ? '⚠ Upload paused' : uploading ? '⬆ Uploading…' : '⏳ Queued'}
+        </span>
+        {q.totalPending > 0 && (
+          <span style={{fontSize:12, color:'#4A5568'}}>
+            {q.totalPending} file{q.totalPending!==1?'s':''} · {fmtSize(q.totalSizeBytes)}
+          </span>
+        )}
+        {q.failedFiles > 0 && (
+          <span style={{fontSize:12, color:'#C53030'}}>· {q.failedFiles} failed</span>
+        )}
+        {q.isProcessingLarge && <span style={{fontSize:11,color:'#2C5282'}}>📁 large file</span>}
+        {q.isProcessingSmall && !q.isProcessingLarge && <span style={{fontSize:11,color:'#2C5282'}}>📄 small file</span>}
+      </div>
+    );
+  }
 
-        socket.on('devices_update', (data) => {
-          setDevices(data);
-          // Remove selected devices that no longer exist
-          setSelectedDevices(prev => prev.filter(id => data[id]));
-        });
+  /* ─── Device Card ───────────────────────────────────────────── */
+  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, timer, ssStatus}) {
+    const [editing, setEditing] = useState(false);
+    const [name, setName]       = useState(dev.deviceName);
+    const color = devColor(dev.deviceId);
+    const capturing = ssStatus?.status === 'requesting' || ssStatus?.status === 'capturing' || ssStatus?.status === 'uploading';
 
-        socket.on('new_recording', () => fetchRecordings());
+    const save = () => { if (name.trim()) onRename(dev.deviceId, name.trim()); setEditing(false); };
 
-        socket.on('recording_error', (data) => {
-          setError(`Recording error on ${data.deviceName || data.deviceId}: ${data.error}`);
-        });
+    const subline = [dev.model, dev.manufacturer, dev.androidVersion ? 'Android '+dev.androidVersion : '']
+      .filter(Boolean).join(' · ');
 
-        socket.on('upload_error', (data) => {
-          setError(`Upload error on ${data.deviceName || data.deviceId}: ${data.error}`);
-        });
+    return (
+      <Card accent={color} style={{marginBottom:12}}>
+        {/* ── Top row: name + status ── */}
+        <div style={{padding:'14px 16px 10px'}}>
+          <div style={{display:'flex', alignItems:'flex-start', gap:10}}>
+            <Dot online={dev.isOnline} recording={dev.isRecording} size={11} />
 
-        socket.on('screenshot_status', (data) => {
-          setScreenshotStatus(prev => ({ ...prev, [data.deviceId]: data }));
-          if (data.status === 'permission_required') {
-            setError(`Screenshot: Please grant permission on ${data.deviceName || data.deviceId}`);
-          }
-        });
-
-        socket.on('screenshot_captured', (data) => {
-          setScreenshotStatus(prev => ({ ...prev, [data.deviceId]: { ...data, status: 'uploading' } }));
-        });
-
-        socket.on('screenshot_uploaded', () => fetchScreenshots());
-        socket.on('screenshot_received', () => fetchScreenshots());
-
-        socket.on('screenshot_error', (data) => {
-          setError(`Screenshot error on ${data.deviceName || data.deviceId}: ${data.error}`);
-          setScreenshotStatus(prev => {
-            const copy = { ...prev };
-            delete copy[data.deviceId];
-            return copy;
-          });
-        });
-
-        fetchRecordings();
-        fetchScreenshots();
-        return () => { socket.disconnect(); };
-      }, [fetchRecordings, fetchScreenshots]);
-
-      // Clean up timer intervals on unmount
-      useEffect(() => {
-        return () => {
-          Object.values(timerIntervalsRef.current).forEach(clearInterval);
-        };
-      }, []);
-
-      // Toggle device selection
-      const toggleDevice = (deviceId) => {
-        setSelectedDevices(prev =>
-          prev.includes(deviceId)
-            ? prev.filter(id => id !== deviceId)
-            : [...prev, deviceId]
-        );
-      };
-
-      const selectAll = () => {
-        const onlineIds = onlineDevices.map(d => d.deviceId);
-        const allSelected = onlineIds.every(id => selectedDevices.includes(id));
-        setSelectedDevices(allSelected ? [] : onlineIds);
-      };
-
-      // Start countdown timer for a device
-      const startTimer = (deviceId, durationSec) => {
-        if (timerIntervalsRef.current[deviceId]) clearInterval(timerIntervalsRef.current[deviceId]);
-        setTimers(prev => ({ ...prev, [deviceId]: durationSec }));
-        timerIntervalsRef.current[deviceId] = setInterval(() => {
-          setTimers(prev => {
-            const remaining = (prev[deviceId] || 0) - 1;
-            if (remaining <= 0) {
-              clearInterval(timerIntervalsRef.current[deviceId]);
-              delete timerIntervalsRef.current[deviceId];
-              const copy = { ...prev };
-              delete copy[deviceId];
-              return copy;
-            }
-            return { ...prev, [deviceId]: remaining };
-          });
-        }, 1000);
-      };
-
-      const clearTimer = (deviceId) => {
-        if (timerIntervalsRef.current[deviceId]) {
-          clearInterval(timerIntervalsRef.current[deviceId]);
-          delete timerIntervalsRef.current[deviceId];
-        }
-        setTimers(prev => {
-          const copy = { ...prev };
-          delete copy[deviceId];
-          return copy;
-        });
-      };
-
-      // Record on specific device
-      const handleRecordDevice = (deviceId) => {
-        setError('');
-        socketRef.current.emit('start_recording', {
-          targetDeviceId: deviceId,
-          duration: selectedDuration
-        });
-        startTimer(deviceId, selectedDuration);
-      };
-
-      // Record on selected devices
-      const handleRecordSelected = () => {
-        if (selectedDevices.length === 0) return;
-        setError('');
-        selectedDevices.forEach(id => {
-          const dev = devices[id];
-          if (dev && dev.isOnline && !dev.isRecording) {
-            socketRef.current.emit('start_recording', {
-              targetDeviceId: id,
-              duration: selectedDuration
-            });
-            startTimer(id, selectedDuration);
-          }
-        });
-      };
-
-      // Record all online
-      const handleRecordAll = () => {
-        setError('');
-        onlineDevices.forEach(dev => {
-          if (!dev.isRecording) {
-            socketRef.current.emit('start_recording', {
-              targetDeviceId: dev.deviceId,
-              duration: selectedDuration
-            });
-            startTimer(dev.deviceId, selectedDuration);
-          }
-        });
-      };
-
-      // Stop specific device
-      const handleStopDevice = (deviceId) => {
-        socketRef.current.emit('stop_recording', { targetDeviceId: deviceId });
-        clearTimer(deviceId);
-      };
-
-      // Stop all
-      const handleStopAll = () => {
-        socketRef.current.emit('stop_recording', { targetDeviceId: 'all' });
-        Object.keys(timerIntervalsRef.current).forEach(clearTimer);
-      };
-
-      // Rename device
-      const handleRename = (deviceId) => {
-        if (!editName.trim()) return;
-        socketRef.current.emit('update_device_name', {
-          targetDeviceId: deviceId,
-          newName: editName.trim()
-        });
-        setEditingDevice(null);
-        setEditName('');
-      };
-
-      // Delete recording
-      const handleDelete = async (deviceId, filename) => {
-        if (!confirm('Delete this recording?')) return;
-        try {
-          const res = await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-          if (res.ok) fetchRecordings();
-          else setError('Failed to delete recording');
-        } catch (err) {
-          setError('Failed to delete recording');
-        }
-      };
-
-      // Take screenshot
-      const handleTakeScreenshot = (deviceId) => {
-        setScreenshotStatus(prev => ({ ...prev, [deviceId]: { status: 'requesting' } }));
-        socketRef.current.emit('take_screenshot', { targetDeviceId: deviceId });
-      };
-
-      const handleTakeScreenshotAll = () => {
-        onlineDevices.forEach(dev => handleTakeScreenshot(dev.deviceId));
-      };
-
-      // Delete screenshot
-      const handleDeleteScreenshot = async (deviceId, filename) => {
-        if (!confirm('Delete this screenshot?')) return;
-        try {
-          const res = await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-          if (res.ok) fetchScreenshots();
-          else setError('Failed to delete screenshot');
-        } catch (err) {
-          setError('Failed to delete screenshot');
-        }
-      };
-
-      // Get device status text
-      const getStatusText = (dev) => {
-        if (dev.isRecording) return 'Recording...';
-        if (dev.isOnline) return 'Online';
-        return `Offline (${timeAgo(dev.lastSeen)})`;
-      };
-
-      const getStatusColor = (dev) => {
-        if (dev.isRecording) return '#E57373';
-        if (dev.isOnline) return '#6BBF59';
-        return '#CCC';
-      };
-
-      // Compute total recordings count
-      const totalRecordings = Object.values(recordings).reduce(
-        (sum, g) => sum + (g.recordings ? g.recordings.length : 0), 0
-      );
-
-      const totalScreenshots = Object.values(screenshots).reduce(
-        (sum, g) => sum + (g.screenshots ? g.screenshots.length : 0), 0
-      );
-
-      // Filtered recordings
-      const filteredRecordings = filterDevice === 'all'
-        ? recordings
-        : (recordings[filterDevice] ? { [filterDevice]: recordings[filterDevice] } : {});
-
-      const anyRecording = deviceList.some(d => d.isRecording);
-      const selectedOnlineNotRecording = selectedDevices.filter(
-        id => devices[id] && devices[id].isOnline && !devices[id].isRecording
-      );
-
-      return (
-        <div style={{ maxWidth: 700, margin: '0 auto', padding: '20px 16px', minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-          {/* Header */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 0', borderBottom: '1px solid #E0E0E0', marginBottom: 24 }}>
-            <span style={{ fontSize: 24, fontWeight: 600 }}>Baby Monitor</span>
-            <span style={{ fontSize: 13, color: '#666' }}>
-              {onlineCount} device{onlineCount !== 1 ? 's' : ''} online
-            </span>
-          </div>
-
-          {/* Error Banner */}
-          {error && (
-            <div style={{ background: '#FFF3F3', border: '1px solid #E57373', color: '#C62828', padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 13, cursor: 'pointer' }} onClick={() => setError('')}>
-              {error}
-              <span style={{ float: 'right', fontWeight: 700 }}>&times;</span>
-            </div>
-          )}
-
-          {/* Devices Section */}
-          <div style={{ marginBottom: 24 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <div style={{ fontSize: 18, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
-                Devices
-                {deviceList.length > 0 && (
-                  <span style={{ background: '#4A90A4', color: '#FFF', fontSize: 12, padding: '2px 8px', borderRadius: 10 }}>{deviceList.length}</span>
-                )}
-              </div>
-              {onlineCount > 1 && (
-                <button onClick={selectAll} style={{ background: 'none', border: '1px solid #4A90A4', color: '#4A90A4', borderRadius: 6, padding: '4px 12px', fontSize: 12, cursor: 'pointer' }}>
-                  {onlineDevices.every(d => selectedDevices.includes(d.deviceId)) ? 'Deselect All' : 'Select All'}
-                </button>
-              )}
-            </div>
-
-            {deviceList.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '32px 0', color: '#999', fontSize: 15 }}>No devices registered yet</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {deviceList.map(dev => {
-                  const isSelected = selectedDevices.includes(dev.deviceId);
-                  const timer = timers[dev.deviceId];
-                  return (
-                    <div key={dev.deviceId}
-                      onClick={() => dev.isOnline && toggleDevice(dev.deviceId)}
-                      style={{
-                        background: '#FFF',
-                        borderRadius: 10,
-                        padding: 14,
-                        border: isSelected ? '2px solid #4A90A4' : '1px solid #F0F0F0',
-                        boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-                        cursor: dev.isOnline ? 'pointer' : 'default',
-                        opacity: dev.isOnline ? 1 : 0.6,
-                        transition: 'all 0.2s ease',
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
-                          <span style={{ width: 10, height: 10, borderRadius: '50%', background: getStatusColor(dev), display: 'inline-block', flexShrink: 0 }}
-                            className={dev.isRecording ? 'pulse' : dev.isOnline ? 'dot-pulse' : ''} />
-                          <div style={{ flex: 1 }}>
-                            {editingDevice === dev.deviceId ? (
-                              <div style={{ display: 'flex', gap: 6 }} onClick={e => e.stopPropagation()}>
-                                <input
-                                  value={editName}
-                                  onChange={e => setEditName(e.target.value)}
-                                  onKeyDown={e => e.key === 'Enter' && handleRename(dev.deviceId)}
-                                  autoFocus
-                                  style={{ fontSize: 14, padding: '4px 8px', borderRadius: 6, border: '1px solid #DDD', flex: 1 }}
-                                />
-                                <button onClick={() => handleRename(dev.deviceId)} style={{ background: '#4A90A4', color: '#FFF', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer' }}>Save</button>
-                                <button onClick={() => setEditingDevice(null)} style={{ background: 'none', border: '1px solid #CCC', borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer' }}>Cancel</button>
-                              </div>
-                            ) : (
-                              <div>
-                                <span style={{ fontSize: 15, fontWeight: 500 }}>{dev.deviceName}</span>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setEditingDevice(dev.deviceId); setEditName(dev.deviceName); }}
-                                  style={{ background: 'none', border: 'none', color: '#999', fontSize: 12, cursor: 'pointer', marginLeft: 6 }}
-                                  title="Rename"
-                                >&#9998;</button>
-                              </div>
-                            )}
-                            <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>
-                              {dev.model}{dev.manufacturer ? ` / ${dev.manufacturer}` : ''}
-                              {dev.androidVersion ? ` / Android ${dev.androidVersion}` : ''}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} onClick={e => e.stopPropagation()}>
-                          <span style={{ fontSize: 12, color: getStatusColor(dev), fontWeight: 500 }}
-                            className={dev.isRecording ? 'pulse' : ''}>
-                            {getStatusText(dev)}
-                            {timer !== undefined && ` (${formatTime(timer)})`}
-                          </span>
-                          {dev.isOnline && !dev.isRecording && (
-                            <button onClick={() => handleRecordDevice(dev.deviceId)}
-                              style={{ background: '#4A90A4', color: '#FFF', border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer' }}>
-                              Record
-                            </button>
-                          )}
-                          {dev.isOnline && (
-                            <button onClick={() => handleTakeScreenshot(dev.deviceId)}
-                              disabled={screenshotStatus[dev.deviceId]?.status === 'requesting' || screenshotStatus[dev.deviceId]?.status === 'capturing'}
-                              style={{
-                                background: screenshotStatus[dev.deviceId]?.status === 'requesting' ? '#CCC' : '#7B68AE',
-                                color: '#FFF', border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer'
-                              }}>
-                              {screenshotStatus[dev.deviceId]?.status === 'requesting' ? 'Capturing...' : 'Screenshot'}
-                            </button>
-                          )}
-                          {dev.isRecording && (
-                            <button onClick={() => handleStopDevice(dev.deviceId)}
-                              style={{ background: 'none', border: '1px solid #E57373', color: '#E57373', borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer' }}>
-                              Stop
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Controls */}
-          <div style={{ textAlign: 'center', padding: '24px 0', marginBottom: 24, background: '#FFF', borderRadius: 10, border: '1px solid #F0F0F0' }}>
-            <div style={{ marginBottom: 16 }}>
-              <select
-                value={selectedDuration}
-                onChange={(e) => setSelectedDuration(Number(e.target.value))}
-                style={{ padding: '10px 16px', fontSize: 15, borderRadius: 8, border: '1px solid #DDD', background: '#FFF', color: '#333', cursor: 'pointer', minWidth: 200 }}
-              >
-                {durationOptions.map(opt => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap' }}>
-              {selectedDevices.length > 0 && (
-                <button
-                  onClick={handleRecordSelected}
-                  disabled={selectedOnlineNotRecording.length === 0}
-                  style={{
-                    padding: '12px 28px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10, cursor: selectedOnlineNotRecording.length > 0 ? 'pointer' : 'not-allowed',
-                    color: '#FFF', background: selectedOnlineNotRecording.length > 0 ? '#4A90A4' : '#CCC'
-                  }}
-                >
-                  Record Selected ({selectedDevices.length})
-                </button>
-              )}
-              <button
-                onClick={handleRecordAll}
-                disabled={onlineCount === 0}
-                style={{
-                  padding: '12px 28px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10,
-                  cursor: onlineCount > 0 ? 'pointer' : 'not-allowed',
-                  color: '#FFF', background: onlineCount > 0 ? '#4A90A4' : '#CCC'
-                }}
-              >
-                {onlineCount === 0 ? 'No Devices Online' : `Record All (${onlineCount})`}
-              </button>
-              <button
-                onClick={handleTakeScreenshotAll}
-                disabled={onlineCount === 0}
-                style={{
-                  padding: '12px 28px', fontSize: 15, fontWeight: 600, border: 'none', borderRadius: 10,
-                  cursor: onlineCount > 0 ? 'pointer' : 'not-allowed',
-                  color: '#FFF', background: onlineCount > 0 ? '#7B68AE' : '#CCC'
-                }}
-              >
-                Screenshot All
-              </button>
-              {anyRecording && (
-                <button onClick={handleStopAll}
-                  style={{ padding: '12px 28px', fontSize: 15, fontWeight: 500, border: '2px solid #E57373', borderRadius: 10, cursor: 'pointer', color: '#E57373', background: 'transparent' }}>
-                  Stop All
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Tabs */}
-          <div style={{ flex: 1 }}>
-            <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '2px solid #E0E0E0' }}>
-              <button onClick={() => setActiveTab('recordings')}
-                style={{
-                  padding: '10px 20px', fontSize: 15, fontWeight: 600, border: 'none', background: 'none', cursor: 'pointer',
-                  color: activeTab === 'recordings' ? '#4A90A4' : '#999',
-                  borderBottom: activeTab === 'recordings' ? '2px solid #4A90A4' : '2px solid transparent',
-                  marginBottom: -2
-                }}>
-                Recordings {totalRecordings > 0 && <span style={{ background: '#4A90A4', color: '#FFF', fontSize: 11, padding: '1px 7px', borderRadius: 10, marginLeft: 6 }}>{totalRecordings}</span>}
-              </button>
-              <button onClick={() => setActiveTab('screenshots')}
-                style={{
-                  padding: '10px 20px', fontSize: 15, fontWeight: 600, border: 'none', background: 'none', cursor: 'pointer',
-                  color: activeTab === 'screenshots' ? '#7B68AE' : '#999',
-                  borderBottom: activeTab === 'screenshots' ? '2px solid #7B68AE' : '2px solid transparent',
-                  marginBottom: -2
-                }}>
-                Screenshots {totalScreenshots > 0 && <span style={{ background: '#7B68AE', color: '#FFF', fontSize: 11, padding: '1px 7px', borderRadius: 10, marginLeft: 6 }}>{totalScreenshots}</span>}
-              </button>
-            </div>
-
-            {activeTab === 'recordings' && (
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-                  <select
-                    value={filterDevice}
-                    onChange={e => setFilterDevice(e.target.value)}
-                    style={{ padding: '6px 12px', fontSize: 13, borderRadius: 6, border: '1px solid #DDD', background: '#FFF' }}
-                  >
-                    <option value="all">All Devices</option>
-                    {Object.entries(recordings).map(([id, group]) => (
-                      <option key={id} value={id}>{group.deviceName} ({group.recordings.length})</option>
-                    ))}
-                  </select>
+            <div style={{flex:1, minWidth:0}}>
+              {editing ? (
+                <div style={{display:'flex', gap:6, marginBottom:4}}>
+                  <input
+                    value={name} autoFocus
+                    onChange={e=>setName(e.target.value)}
+                    onKeyDown={e=>{ if(e.key==='Enter')save(); if(e.key==='Escape')setEditing(false); }}
+                    style={{
+                      flex:1, fontSize:15, padding:'5px 10px', borderRadius:8, minWidth:0,
+                      border:'1.5px solid #4A90A4', outline:'none',
+                    }}
+                  />
+                  <Btn sm onClick={save}>Save</Btn>
+                  <Btn sm outline color="#718096" onClick={()=>setEditing(false)}>✕</Btn>
                 </div>
+              ) : (
+                <div style={{display:'flex', alignItems:'center', gap:4, flexWrap:'wrap'}}>
+                  <span style={{fontSize:16, fontWeight:700, color:'#1A202C', wordBreak:'break-all'}}>
+                    {dev.deviceName}
+                  </span>
+                  <button
+                    onClick={()=>{ setName(dev.deviceName); setEditing(true); }}
+                    style={{color:'#CBD5E0', fontSize:14, padding:'0 2px', flexShrink:0}}
+                  >✎</button>
+                </div>
+              )}
+              {subline && (
+                <div style={{fontSize:11, color:'#A0AEC0', marginTop:2, lineHeight:1.4}}>
+                  {subline}
+                </div>
+              )}
+            </div>
 
-                {Object.keys(filteredRecordings).length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '48px 0', color: '#999', fontSize: 15 }}>No recordings yet</div>
-                ) : (
-                  Object.entries(filteredRecordings).map(([deviceId, group]) => (
-                    <div key={deviceId} style={{ marginBottom: 24 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: '#666', marginBottom: 10, paddingBottom: 6, borderBottom: '1px solid #EEE' }}>
-                        {group.deviceName}
-                        <span style={{ fontWeight: 400, color: '#999', marginLeft: 8 }}>({group.recordings.length})</span>
-                      </div>
-                      {group.recordings.map(rec => (
-                        <div key={rec.filename} style={{ background: '#FFF', borderRadius: 10, padding: 14, marginBottom: 10, boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #F0F0F0' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-                            <span style={{ fontSize: 14, fontWeight: 500, wordBreak: 'break-all' }}>{rec.filename}</span>
-                            <span style={{ fontSize: 12, color: '#999', flexShrink: 0, marginLeft: 8 }}>{formatSize(rec.size)}</span>
-                          </div>
-                          <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>{formatDate(rec.created)}</div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <audio controls preload="none" style={{ flex: 1, height: 40 }}>
-                              <source src={rec.url} />
-                            </audio>
-                            <button
-                              onClick={() => handleDelete(deviceId, rec.filename)}
-                              style={{ background: 'none', border: '1px solid #E57373', color: '#E57373', borderRadius: 8, padding: '6px 12px', fontSize: 13, cursor: 'pointer', flexShrink: 0 }}
-                            >Delete</button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-
-            {activeTab === 'screenshots' && (
-              <div>
-                {Object.keys(screenshots).length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '48px 0', color: '#999', fontSize: 15 }}>No screenshots yet</div>
-                ) : (
-                  Object.entries(screenshots).map(([deviceId, group]) => (
-                    <div key={deviceId} style={{ marginBottom: 24 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: '#666', marginBottom: 10, paddingBottom: 6, borderBottom: '1px solid #EEE' }}>
-                        {group.deviceName}
-                        <span style={{ fontWeight: 400, color: '#999', marginLeft: 8 }}>({group.screenshots.length})</span>
-                      </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10 }}>
-                        {group.screenshots.map(shot => (
-                          <div key={shot.filename} style={{ background: '#FFF', borderRadius: 10, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #F0F0F0' }}>
-                            <img
-                              src={shot.url}
-                              alt={shot.filename}
-                              loading="lazy"
-                              onClick={() => setLightboxImg(shot.url)}
-                              style={{ width: '100%', height: 200, objectFit: 'cover', cursor: 'pointer', display: 'block' }}
-                            />
-                            <div style={{ padding: 8 }}>
-                              <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{formatDate(shot.created)}</div>
-                              <div style={{ fontSize: 11, color: '#999', marginBottom: 6 }}>{formatSize(shot.size)}</div>
-                              <button
-                                onClick={() => handleDeleteScreenshot(deviceId, shot.filename)}
-                                style={{ background: 'none', border: '1px solid #E57373', color: '#E57373', borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer', width: '100%' }}
-                              >Delete</button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
+            {/* Status pill */}
+            <div style={{flexShrink:0, textAlign:'right'}}>
+              <Pill color={dev.isRecording?'#C53030':dev.isOnline?'#276749':'#718096'}
+                    bg={dev.isRecording?'#FFF5F5':dev.isOnline?'#F0FFF4':'#F7FAFC'}>
+                {dev.isRecording
+                  ? `● REC${timer ? ' '+fmtTimer(timer) : ''}`
+                  : dev.isOnline ? '● Online' : '○ Offline'}
+              </Pill>
+              {!dev.isOnline && dev.lastSeen && (
+                <div style={{fontSize:10, color:'#A0AEC0', marginTop:3}}>{timeAgo(dev.lastSeen)}</div>
+              )}
+            </div>
           </div>
 
-          {/* Lightbox */}
-          {lightboxImg && (
-            <div onClick={() => setLightboxImg(null)}
-              style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, cursor: 'pointer' }}>
-              <img src={lightboxImg} style={{ maxWidth: '95vw', maxHeight: '95vh', borderRadius: 8 }} />
-            </div>
+          {/* Upload queue */}
+          {dev.uploadQueueStatus
+            ? <QueueBadge q={dev.uploadQueueStatus} />
+            : dev.pendingUploads > 0
+              ? <div style={{marginTop:8,fontSize:12,color:'#718096'}}>
+                  ⏳ {dev.pendingUploads} pending upload{dev.pendingUploads!==1?'s':''}
+                </div>
+              : null
+          }
+          {dev.notificationsEnabled === false && (
+            <div style={{marginTop:6,fontSize:11,color:'#E53E3E'}}>🔕 Notifications disabled on device</div>
           )}
+        </div>
 
-          {/* Footer */}
-          <div style={{ marginTop: 'auto', padding: '16px 0', borderTop: '1px solid #E0E0E0', fontSize: 12, color: '#999', textAlign: 'center' }}>
-            Vantus Baby Monitor
+        {/* ── Action row (only when online) ── */}
+        {dev.isOnline && (
+          <div style={{
+            padding:'10px 14px 14px', display:'flex', gap:8, flexWrap:'wrap',
+            borderTop:'1px solid #F7FAFC',
+          }}>
+            {dev.isRecording ? (
+              <Btn sm outline color="#E53E3E" onClick={()=>onStop(dev.deviceId)}>■ Stop</Btn>
+            ) : (
+              <Btn sm color="#4A90A4" onClick={()=>onRecord(dev.deviceId)}>◉ Record</Btn>
+            )}
+            <Btn
+              sm color="#7B68AE"
+              onClick={()=>onScreenshot(dev.deviceId)}
+              disabled={capturing}
+            >
+              {capturing ? '⏳ …' : '📷 Screenshot'}
+            </Btn>
+            {ssStatus?.status === 'uploading' && (
+              <span style={{fontSize:11,color:'#7B68AE',alignSelf:'center'}}>uploading…</span>
+            )}
+          </div>
+        )}
+      </Card>
+    );
+  }
+
+  /* ─── Recording row (inline player) ─────────────────────────── */
+  function RecRow({rec, deviceId, onDelete}) {
+    const [open, setOpen] = useState(false);
+    return (
+      <div style={{borderBottom:'1px solid #F0F4F5', padding:'11px 0'}}>
+        <div style={{display:'flex', alignItems:'center', gap:8}}>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{fontSize:13, fontWeight:500, color:'#2D3748',
+                         overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+              {rec.filename}
+            </div>
+            <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
+              {fmtDate(rec.created)} · {fmtSize(rec.size)}
+            </div>
+          </div>
+          <div style={{display:'flex', gap:6, flexShrink:0}}>
+            <button
+              onClick={()=>setOpen(!open)}
+              style={{
+                height:34, padding:'0 12px', fontSize:13, fontWeight:600, borderRadius:8,
+                background: open?'#EBF8FF':'#F7FAFC',
+                border:'1px solid #BEE3F8', color:'#4A90A4',
+              }}
+            >{open ? '▲' : '▶'}</button>
+            <button
+              onClick={()=>onDelete(deviceId, rec.filename)}
+              style={{
+                height:34, padding:'0 10px', fontSize:13, borderRadius:8,
+                border:'1px solid #FED7D7', color:'#E53E3E',
+              }}
+            >✕</button>
           </div>
         </div>
-      );
-    }
+        {open && (
+          <audio controls autoPlay style={{marginTop:8}}>
+            <source src={rec.url} />
+          </audio>
+        )}
+      </div>
+    );
+  }
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
-  </script>
-  <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js');
+  /* ─── Device group block (Recordings) ───────────────────────── */
+  function RecGroup({deviceId, group, onDelete}) {
+    const [open, setOpen] = useState(true);
+    const color = devColor(deviceId);
+    return (
+      <div style={{marginBottom:18}}>
+        {/* Group header — looks like a folder tab */}
+        <button
+          onClick={()=>setOpen(!open)}
+          style={{
+            width:'100%', display:'flex', alignItems:'center', gap:10,
+            padding:'10px 14px',
+            background: color+'14',
+            borderRadius: open ? '12px 12px 0 0' : 12,
+            border:`1.5px solid ${color+'33'}`,
+            borderBottom: open ? 'none' : undefined,
+          }}
+        >
+          <span style={{width:12, height:12, borderRadius:'50%', background:color, flexShrink:0}} />
+          <span style={{flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#2D3748'}}>
+            {group.deviceName}
+          </span>
+          <span style={{fontSize:12, color:'#718096'}}>
+            {group.recordings.length} recording{group.recordings.length!==1?'s':''}
+          </span>
+          <span style={{fontSize:11, color:'#A0AEC0'}}>{open ? '▲' : '▼'}</span>
+        </button>
+
+        {open && (
+          <div style={{
+            background:'#FFF', borderRadius:'0 0 12px 12px',
+            border:`1.5px solid ${color+'33'}`, borderTop:'none',
+            padding:'0 14px',
+          }}>
+            {group.recordings.map(rec => (
+              <RecRow key={rec.filename} rec={rec} deviceId={deviceId} onDelete={onDelete} />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ─── Screenshot thumbnail ───────────────────────────────────── */
+  function ShotThumb({shot, deviceId, onDelete, onLightbox}) {
+    return (
+      <div style={{
+        background:'#FFF', borderRadius:10, overflow:'hidden',
+        boxShadow:'0 1px 4px rgba(0,0,0,0.08)',
+      }}>
+        <img
+          src={shot.url} alt={shot.filename} loading="lazy"
+          onClick={()=>onLightbox(shot.url)}
+          style={{width:'100%', height:130, objectFit:'cover', display:'block', cursor:'zoom-in'}}
+        />
+        <div style={{padding:'7px 9px 9px'}}>
+          <div style={{fontSize:11, color:'#718096'}}>{fmtDate(shot.created)}</div>
+          <div style={{fontSize:11, color:'#A0AEC0', marginBottom:6}}>{fmtSize(shot.size)}</div>
+          <button
+            onClick={()=>onDelete(deviceId, shot.filename)}
+            style={{
+              width:'100%', fontSize:12, padding:'4px 0', borderRadius:6,
+              border:'1px solid #FED7D7', color:'#E53E3E',
+            }}
+          >Delete</button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ─── Device group block (Screenshots) ──────────────────────── */
+  function ShotGroup({deviceId, group, onDelete, onLightbox}) {
+    const [open, setOpen] = useState(true);
+    const color = devColor(deviceId);
+    return (
+      <div style={{marginBottom:18}}>
+        <button
+          onClick={()=>setOpen(!open)}
+          style={{
+            width:'100%', display:'flex', alignItems:'center', gap:10,
+            padding:'10px 14px',
+            background: color+'14',
+            borderRadius: open ? '12px 12px 0 0' : 12,
+            border:`1.5px solid ${color+'33'}`,
+            borderBottom: open ? 'none' : undefined,
+          }}
+        >
+          <span style={{width:12, height:12, borderRadius:'50%', background:color, flexShrink:0}} />
+          <span style={{flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#2D3748'}}>
+            {group.deviceName}
+          </span>
+          <span style={{fontSize:12, color:'#718096'}}>
+            {group.screenshots.length} shot{group.screenshots.length!==1?'s':''}
+          </span>
+          <span style={{fontSize:11, color:'#A0AEC0'}}>{open ? '▲' : '▼'}</span>
+        </button>
+
+        {open && (
+          <div style={{
+            background:'#F7FAFC', borderRadius:'0 0 12px 12px',
+            border:`1.5px solid ${color+'33'}`, borderTop:'none',
+            padding:10,
+            display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8,
+          }}>
+            {group.screenshots.map(shot => (
+              <ShotThumb
+                key={shot.filename}
+                shot={shot} deviceId={deviceId}
+                onDelete={onDelete} onLightbox={onLightbox}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ─── Toast ─────────────────────────────────────────────────── */
+  function Toast({toast, onDismiss}) {
+    if (!toast) return null;
+    const bg = toast.type==='error'?'#C53030': toast.type==='warn'?'#C05621':'#2B6CB0';
+    return (
+      <div onClick={onDismiss} style={{
+        position:'fixed', top:68, left:'50%', transform:'translateX(-50%)',
+        zIndex:500, background:bg, color:'#FFF',
+        padding:'10px 18px', borderRadius:12, maxWidth:'92vw',
+        fontSize:13, fontWeight:500, textAlign:'center',
+        boxShadow:'0 4px 20px rgba(0,0,0,0.3)', cursor:'pointer',
+        animation:'fadein .2s ease',
+      }}>{toast.msg}</div>
+    );
+  }
+
+  /* ─── Empty state ───────────────────────────────────────────── */
+  function Empty({icon, title, sub}) {
+    return (
+      <div style={{textAlign:'center', padding:'64px 24px', color:'#A0AEC0'}}>
+        <div style={{fontSize:44, marginBottom:12}}>{icon}</div>
+        <div style={{fontSize:16, fontWeight:600, color:'#718096'}}>{title}</div>
+        {sub && <div style={{fontSize:13, marginTop:6}}>{sub}</div>}
+      </div>
+    );
+  }
+
+  /* ─── Main App ──────────────────────────────────────────────── */
+  function App() {
+    const [devices,         setDevices]         = useState({});
+    const [recordings,      setRecordings]      = useState({});
+    const [screenshots,     setScreenshots]     = useState({});
+    const [ssStatus,        setSsStatus]        = useState({});
+    const [timers,          setTimers]          = useState({});
+    const [duration,        setDuration]        = useState(60);
+    const [tab,             setTab]             = useState('devices');
+    const [lightbox,        setLightbox]        = useState(null);
+    const [toast,           setToast]           = useState(null);
+    const [connected,       setConnected]       = useState(false);
+
+    const socketRef   = useRef(null);
+    const timerRefs   = useRef({});
+
+    const devList     = useMemo(() => Object.values(devices), [devices]);
+    const onlineDev   = useMemo(() => devList.filter(d => d.isOnline), [devList]);
+    const anyRec      = useMemo(() => devList.some(d => d.isRecording), [devList]);
+    const totalRec    = useMemo(() => Object.values(recordings).reduce((s,g)=>s+(g.recordings?.length||0),0), [recordings]);
+    const totalShots  = useMemo(() => Object.values(screenshots).reduce((s,g)=>s+(g.screenshots?.length||0),0), [screenshots]);
+
+    const showToast = useCallback((msg, type='info') => {
+      setToast({msg, type});
+      setTimeout(() => setToast(null), 4000);
+    }, []);
+
+    const fetchRec  = useCallback(async () => { try { setRecordings(await (await fetch('/recordings')).json()); } catch(e){} }, []);
+    const fetchShot = useCallback(async () => { try { setScreenshots(await (await fetch('/api/screenshots')).json()); } catch(e){} }, []);
+
+    /* Socket setup */
+    useEffect(() => {
+      const socket = io({ transports: ['websocket', 'polling'] });
+      socketRef.current = socket;
+
+      socket.on('connect',    () => setConnected(true));
+      socket.on('disconnect', () => { setConnected(false); showToast('Connection lost — reconnecting…', 'warn'); });
+
+      socket.on('devices_update',     setDevices);
+      socket.on('new_recording',      fetchRec);
+      socket.on('screenshot_uploaded', d => {
+        fetchShot();
+        if (d && d.deviceId) setSsStatus(p => { const c={...p}; delete c[d.deviceId]; return c; });
       });
-    }
-  </script>
+      socket.on('screenshot_received', d => {
+        fetchShot();
+        if (d && d.deviceId) setSsStatus(p => { const c={...p}; delete c[d.deviceId]; return c; });
+      });
+
+      socket.on('screenshot_status', d => {
+        setSsStatus(p => ({ ...p, [d.deviceId]: d }));
+        if (d.status === 'permission_required')
+          showToast(`Grant screenshot permission on ${d.deviceName||d.deviceId}`, 'warn');
+      });
+      socket.on('screenshot_captured', d =>
+        setSsStatus(p => ({ ...p, [d.deviceId]: { ...d, status:'uploading' } }))
+      );
+      socket.on('screenshot_error', d => {
+        showToast(`Screenshot failed on ${d.deviceName||d.deviceId}: ${d.error}`, 'error');
+        setSsStatus(p => { const c={...p}; delete c[d.deviceId]; return c; });
+      });
+      socket.on('recording_error', d =>
+        showToast(`Recording error on ${d.deviceName||d.deviceId}: ${d.error}`, 'error')
+      );
+      socket.on('upload_error', d =>
+        showToast(`Upload error on ${d.deviceName||d.deviceId}: ${d.error}`, 'error')
+      );
+      socket.on('upload_failed', d =>
+        showToast(`Upload failed: ${d.filename} (attempt ${d.failCount})`, 'warn')
+      );
+
+      fetchRec();
+      fetchShot();
+      return () => { socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
+    }, [fetchRec, fetchShot, showToast]);
+
+    /* Timer helpers */
+    const startTimer = useCallback((id, sec) => {
+      if (timerRefs.current[id]) clearInterval(timerRefs.current[id]);
+      setTimers(p => ({ ...p, [id]: sec }));
+      timerRefs.current[id] = setInterval(() => {
+        setTimers(p => {
+          const rem = (p[id]||0) - 1;
+          if (rem <= 0) {
+            clearInterval(timerRefs.current[id]);
+            delete timerRefs.current[id];
+            const c={...p}; delete c[id]; return c;
+          }
+          return { ...p, [id]: rem };
+        });
+      }, 1000);
+    }, []);
+
+    const stopTimer = useCallback((id) => {
+      if (timerRefs.current[id]) { clearInterval(timerRefs.current[id]); delete timerRefs.current[id]; }
+      setTimers(p => { const c={...p}; delete c[id]; return c; });
+    }, []);
+
+    /* Actions */
+    const record = (id) => {
+      socketRef.current.emit('start_recording', { targetDeviceId:id, duration });
+      startTimer(id, duration);
+    };
+    const stop   = (id) => {
+      socketRef.current.emit('stop_recording',  { targetDeviceId:id });
+      stopTimer(id);
+    };
+    const shot   = (id) => {
+      setSsStatus(p => ({ ...p, [id]: { status:'requesting' } }));
+      socketRef.current.emit('take_screenshot', { targetDeviceId:id });
+    };
+    const rename = (id, n) =>
+      socketRef.current.emit('update_device_name', { targetDeviceId:id, newName:n });
+
+    const recordAll = () => onlineDev.filter(d=>!d.isRecording).forEach(d=>record(d.deviceId));
+    const stopAll   = () => {
+      socketRef.current.emit('stop_recording', { targetDeviceId:'all' });
+      Object.keys(timerRefs.current).forEach(stopTimer);
+    };
+    const shotAll   = () => onlineDev.forEach(d=>shot(d.deviceId));
+
+    const delRec  = async (deviceId, filename) => {
+      if (!confirm('Delete this recording?')) return;
+      await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+      fetchRec();
+    };
+    const delShot = async (deviceId, filename) => {
+      if (!confirm('Delete this screenshot?')) return;
+      await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+      fetchShot();
+    };
+
+    /* Tab button style */
+    const tabStyle = (active, color='#4A90A4') => ({
+      flex:1, padding:'11px 0', fontSize:13, fontWeight:600,
+      border:'none', background:'none', cursor:'pointer',
+      color: active ? color : '#A0AEC0',
+      borderBottom: `2.5px solid ${active ? color : 'transparent'}`,
+      marginBottom:-1, transition:'color .15s',
+    });
+
+    /* ── Render ── */
+    return (
+      <div style={{minHeight:'100vh', display:'flex', flexDirection:'column'}}>
+
+        {/* ── Sticky header ─────────────────────────────────── */}
+        <div style={{
+          position:'sticky', top:0, zIndex:200,
+          background:'#0F2A35', color:'#FFF',
+          padding:`calc(10px + var(--safe-top)) 16px 10px`,
+          display:'flex', alignItems:'center', justifyContent:'space-between',
+          boxShadow:'0 2px 10px rgba(0,0,0,0.25)',
+        }}>
+          <div>
+            <div style={{fontSize:18, fontWeight:700, letterSpacing:.3}}>Baby Monitor</div>
+            <div style={{fontSize:11, color:'#94A3B8', marginTop:1}}>
+              {connected
+                ? `${onlineDev.length} device${onlineDev.length!==1?'s':''} online`
+                : 'Connecting…'}
+            </div>
+          </div>
+          <span style={{
+            width:10, height:10, borderRadius:'50%',
+            background: connected ? '#38A169' : '#ECC94B',
+            display:'inline-block', boxShadow:`0 0 0 3px ${connected?'#38A16944':'#ECC94B44'}`,
+          }} className={connected?'':'blink'} />
+        </div>
+
+        {/* ── Tabs ──────────────────────────────────────────── */}
+        <div style={{
+          background:'#FFF', borderBottom:'1px solid #E2E8F0',
+          display:'flex', position:'sticky', top:58, zIndex:190,
+        }}>
+          <button style={tabStyle(tab==='devices')} onClick={()=>setTab('devices')}>
+            Devices
+            {devList.length>0 && (
+              <span style={{marginLeft:5,fontSize:10,background:'#4A90A4',color:'#FFF',
+                            padding:'1px 6px',borderRadius:10}}>{devList.length}</span>
+            )}
+          </button>
+          <button style={tabStyle(tab==='recordings')} onClick={()=>setTab('recordings')}>
+            Recordings
+            {totalRec>0 && (
+              <span style={{marginLeft:5,fontSize:10,background:'#4A90A4',color:'#FFF',
+                            padding:'1px 6px',borderRadius:10}}>{totalRec}</span>
+            )}
+          </button>
+          <button style={tabStyle(tab==='screenshots','#7B68AE')} onClick={()=>setTab('screenshots')}>
+            Screenshots
+            {totalShots>0 && (
+              <span style={{marginLeft:5,fontSize:10,background:'#7B68AE',color:'#FFF',
+                            padding:'1px 6px',borderRadius:10}}>{totalShots}</span>
+            )}
+          </button>
+        </div>
+
+        {/* ── Toast ─────────────────────────────────────────── */}
+        <Toast toast={toast} onDismiss={()=>setToast(null)} />
+
+        {/* ── Scrollable content ────────────────────────────── */}
+        <div style={{
+          flex:1, padding:'14px 12px',
+          paddingBottom:`calc(${tab==='devices'&&onlineDev.length>0 ? '88' : '24'}px + var(--safe-bottom))`,
+        }}>
+
+          {/* DEVICES */}
+          {tab === 'devices' && (
+            devList.length === 0
+              ? <Empty icon="📱" title="No devices connected" sub="Open the Baby Monitor app on an Android device to get started" />
+              : devList.map(dev => (
+                  <DeviceCard
+                    key={dev.deviceId}
+                    dev={dev}
+                    selectedDuration={duration}
+                    onRecord={record}
+                    onStop={stop}
+                    onScreenshot={shot}
+                    onRename={rename}
+                    timer={timers[dev.deviceId]}
+                    ssStatus={ssStatus[dev.deviceId]}
+                  />
+                ))
+          )}
+
+          {/* RECORDINGS */}
+          {tab === 'recordings' && (
+            Object.keys(recordings).length === 0
+              ? <Empty icon="🎙" title="No recordings yet" sub="Start a recording from the Devices tab" />
+              : Object.entries(recordings).map(([id, g]) => (
+                  <RecGroup key={id} deviceId={id} group={g} onDelete={delRec} />
+                ))
+          )}
+
+          {/* SCREENSHOTS */}
+          {tab === 'screenshots' && (
+            Object.keys(screenshots).length === 0
+              ? <Empty icon="🖼" title="No screenshots yet" sub="Take screenshots from the Devices tab" />
+              : Object.entries(screenshots).map(([id, g]) => (
+                  <ShotGroup key={id} deviceId={id} group={g} onDelete={delShot} onLightbox={setLightbox} />
+                ))
+          )}
+        </div>
+
+        {/* ── Floating action bar (Devices tab only) ─────────── */}
+        {tab === 'devices' && onlineDev.length > 0 && (
+          <div style={{
+            position:'fixed', bottom:0, left:0, right:0, zIndex:180,
+            background:'#FFF', borderTop:'1px solid #E2E8F0',
+            padding:`10px 12px calc(10px + var(--safe-bottom))`,
+            display:'flex', gap:8, alignItems:'center',
+            boxShadow:'0 -2px 14px rgba(0,0,0,0.09)',
+          }}>
+            {/* Duration picker */}
+            <select
+              value={duration}
+              onChange={e=>setDuration(Number(e.target.value))}
+              style={{
+                flexShrink:0, height:44, padding:'0 10px', fontSize:13, fontWeight:600,
+                borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC',
+                color:'#2D3748', WebkitAppearance:'none', cursor:'pointer',
+              }}
+            >
+              {DURATIONS.map(d=><option key={d.value} value={d.value}>{d.label}</option>)}
+            </select>
+
+            {/* Record all */}
+            <Btn
+              full
+              color="#4A90A4"
+              onClick={recordAll}
+              disabled={onlineDev.every(d=>d.isRecording)}
+            >
+              ◉ Record All ({onlineDev.length})
+            </Btn>
+
+            {/* Stop all (only when something is recording) */}
+            {anyRec && (
+              <Btn outline color="#E53E3E" onClick={stopAll} style={{flexShrink:0}}>
+                ■ Stop
+              </Btn>
+            )}
+
+            {/* Screenshot all */}
+            <Btn color="#7B68AE" onClick={shotAll} style={{flexShrink:0, padding:'0 14px'}}>
+              📷
+            </Btn>
+          </div>
+        )}
+
+        {/* ── Lightbox ──────────────────────────────────────── */}
+        {lightbox && (
+          <div
+            onClick={()=>setLightbox(null)}
+            style={{
+              position:'fixed', inset:0, zIndex:600,
+              background:'rgba(0,0,0,0.92)',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              padding:16, cursor:'zoom-out',
+            }}
+          >
+            <img
+              src={lightbox}
+              style={{maxWidth:'100%', maxHeight:'100%', borderRadius:8, objectFit:'contain'}}
+            />
+            <button
+              onClick={()=>setLightbox(null)}
+              style={{
+                position:'absolute', top:16, right:16,
+                width:40, height:40, borderRadius:20, fontSize:18,
+                background:'rgba(255,255,255,0.2)', color:'#FFF', border:'none',
+              }}
+            >✕</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
+  }
+</script>
 </body>
 </html>
