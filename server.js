@@ -649,6 +649,8 @@ app.get("/api/devices/:deviceId/audio-config", (req, res) => {
       deviceId: dev.deviceId,
       deviceName: dev.deviceName,
       audioSourceConfig: dev.audioSourceConfig || {},
+      audioTestResults: dev.audioTestResults || {},
+      autoDetectedSource: dev.autoDetectedSource || "not_tested",
       manufacturer: dev.manufacturer,
       model: dev.model,
     });
@@ -986,6 +988,8 @@ io.on("connection", (socket) => {
           hasTestedSources: true,
           lastTestTime: Date.now(),
         };
+        dev.audioTestResults = data.testResults;
+        dev.autoDetectedSource = data.autoDetectedSource;
       }
       io.emit("audio_source_test_complete", data);
       broadcastDevices();
@@ -1074,6 +1078,19 @@ io.on("connection", (socket) => {
       io.emit("recording_retry", data);
     } catch (e) {
       log(`Error in recording_retry: ${e.message}`);
+    }
+  });
+
+  // ─── Connection health ───────────────────────────────────
+
+  socket.on("health_check", (data) => {
+    try {
+      socket.emit("health_check_ack", {
+        deviceId: data && data.deviceId,
+        serverTime: Date.now(),
+      });
+    } catch (e) {
+      log(`Error in health_check: ${e.message}`);
     }
   });
 
@@ -1206,6 +1223,12 @@ io.on("connection", (socket) => {
         if (data.isScreenLocked !== undefined) dev.isScreenLocked = data.isScreenLocked;
         if (data.uploadQueueStatus !== undefined) dev.uploadQueueStatus = data.uploadQueueStatus;
         if (data.audioSourceConfig !== undefined) dev.audioSourceConfig = data.audioSourceConfig;
+        if (data.connectionHealthy !== undefined) dev.connectionHealthy = data.connectionHealthy;
+        // Store top-level audio fields from audioSourceConfig for REST compat
+        if (data.audioSourceConfig) {
+          if (data.audioSourceConfig.testResults) dev.audioTestResults = data.audioSourceConfig.testResults;
+          if (data.audioSourceConfig.autoDetectedSource) dev.autoDetectedSource = data.audioSourceConfig.autoDetectedSource;
+        }
       }
       if (pendingPongs.has(socket.id)) {
         clearTimeout(pendingPongs.get(socket.id));

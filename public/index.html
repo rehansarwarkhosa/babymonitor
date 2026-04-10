@@ -394,6 +394,9 @@
                 </div>
               : null
           }
+          {dev.connectionHealthy === false && dev.isOnline && (
+            <div style={{marginTop:6,fontSize:11,color:'#DD6B20'}}>⚠ Unstable connection</div>
+          )}
           {dev.notificationsEnabled === false && (
             <div style={{marginTop:6,fontSize:11,color:'#E53E3E'}}>🔕 Notifications disabled on device</div>
           )}
