@@ -62,8 +62,9 @@
     select { font-family: inherit; }
     audio  { width: 100%; height: 44px; }
 
-    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar { width: 3px; height: 0; }
     ::-webkit-scrollbar-thumb { background: #CBD5E0; border-radius: 2px; }
+    .tab-bar::-webkit-scrollbar { display: none; }
   </style>
 </head>
 <body>
@@ -469,19 +470,27 @@
               {fmtDate(rec.created)} · {fmtSize(rec.size)}
             </div>
           </div>
-          <div style={{display:'flex', gap:6, flexShrink:0}}>
+          <div style={{display:'flex', gap:5, flexShrink:0}}>
             <button
               onClick={()=>setOpen(!open)}
               style={{
-                height:34, padding:'0 12px', fontSize:13, fontWeight:600, borderRadius:8,
+                height:32, padding:'0 10px', fontSize:12, fontWeight:600, borderRadius:8,
                 background: open?'#EBF8FF':'#F7FAFC',
                 border:'1px solid #BEE3F8', color:'#4A90A4',
               }}
             >{open ? '▲' : '▶'}</button>
+            <a
+              href={rec.url} download={rec.filename}
+              style={{
+                display:'flex', alignItems:'center', justifyContent:'center',
+                height:32, padding:'0 10px', fontSize:12, borderRadius:8,
+                border:'1px solid #C6F6D5', color:'#38A169', textDecoration:'none',
+              }}
+            >⬇</a>
             <button
               onClick={()=>onDelete(deviceId, rec.filename)}
               style={{
-                height:34, padding:'0 10px', fontSize:13, borderRadius:8,
+                height:32, padding:'0 10px', fontSize:12, borderRadius:8,
                 border:'1px solid #FED7D7', color:'#E53E3E',
               }}
             >✕</button>
@@ -497,12 +506,11 @@
   }
 
   /* ─── Device group block (Recordings) ───────────────────────── */
-  function RecGroup({deviceId, group, onDelete}) {
+  function RecGroup({deviceId, group, onDelete, onDeleteAll}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
       <div style={{marginBottom:18}}>
-        {/* Group header — looks like a folder tab */}
         <button
           onClick={()=>setOpen(!open)}
           style={{
@@ -533,6 +541,12 @@
             {group.recordings.map(rec => (
               <RecRow key={rec.filename} rec={rec} deviceId={deviceId} onDelete={onDelete} />
             ))}
+            <div style={{padding:'10px 0', borderTop:'1px solid #F0F4F5'}}>
+              <button onClick={()=>onDeleteAll(deviceId)} style={{
+                width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+                border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+              }}>🗑 Delete All Recordings</button>
+            </div>
           </div>
         )}
       </div>
@@ -554,20 +568,27 @@
         <div style={{padding:'7px 9px 9px'}}>
           <div style={{fontSize:11, color:'#718096'}}>{fmtDate(shot.created)}</div>
           <div style={{fontSize:11, color:'#A0AEC0', marginBottom:6}}>{fmtSize(shot.size)}</div>
-          <button
-            onClick={()=>onDelete(deviceId, shot.filename)}
-            style={{
-              width:'100%', fontSize:12, padding:'4px 0', borderRadius:6,
-              border:'1px solid #FED7D7', color:'#E53E3E',
-            }}
-          >Delete</button>
+          <div style={{display:'flex', gap:4}}>
+            <a href={shot.url} download={shot.filename} style={{
+              flex:1, display:'flex', alignItems:'center', justifyContent:'center',
+              fontSize:12, padding:'4px 0', borderRadius:6,
+              border:'1px solid #C6F6D5', color:'#38A169', textDecoration:'none',
+            }}>⬇</a>
+            <button
+              onClick={()=>onDelete(deviceId, shot.filename)}
+              style={{
+                flex:1, fontSize:12, padding:'4px 0', borderRadius:6,
+                border:'1px solid #FED7D7', color:'#E53E3E',
+              }}
+            >✕</button>
+          </div>
         </div>
       </div>
     );
   }
 
   /* ─── Device group block (Screenshots) ──────────────────────── */
-  function ShotGroup({deviceId, group, onDelete, onLightbox}) {
+  function ShotGroup({deviceId, group, onDelete, onDeleteAll, onLightbox}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
@@ -598,15 +619,20 @@
             background:'#F7FAFC', borderRadius:'0 0 12px 12px',
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:10,
-            display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8,
           }}>
-            {group.screenshots.map(shot => (
-              <ShotThumb
-                key={shot.filename}
-                shot={shot} deviceId={deviceId}
-                onDelete={onDelete} onLightbox={onLightbox}
-              />
-            ))}
+            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:8}}>
+              {group.screenshots.map(shot => (
+                <ShotThumb
+                  key={shot.filename}
+                  shot={shot} deviceId={deviceId}
+                  onDelete={onDelete} onLightbox={onLightbox}
+                />
+              ))}
+            </div>
+            <button onClick={()=>onDeleteAll(deviceId)} style={{
+              width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+              border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+            }}>🗑 Delete All Screenshots</button>
           </div>
         )}
       </div>
@@ -632,20 +658,27 @@
           <div style={{fontSize:10, color:'#E67E22', marginTop:2}}>{img.folderName}</div>
           <div style={{fontSize:11, color:'#718096', marginTop:1}}>{fmtDate(img.dateTaken || img.created)}</div>
           <div style={{fontSize:11, color:'#A0AEC0', marginBottom:6}}>{fmtSize(img.size)}</div>
-          <button
-            onClick={()=>onDelete(deviceId, img.filename)}
-            style={{
-              width:'100%', fontSize:12, padding:'4px 0', borderRadius:6,
-              border:'1px solid #FED7D7', color:'#E53E3E',
-            }}
-          >Delete</button>
+          <div style={{display:'flex', gap:4}}>
+            <a href={img.url} download={img.originalName || img.filename} style={{
+              flex:1, display:'flex', alignItems:'center', justifyContent:'center',
+              fontSize:12, padding:'4px 0', borderRadius:6,
+              border:'1px solid #C6F6D5', color:'#38A169', textDecoration:'none',
+            }}>⬇</a>
+            <button
+              onClick={()=>onDelete(deviceId, img.filename)}
+              style={{
+                flex:1, fontSize:12, padding:'4px 0', borderRadius:6,
+                border:'1px solid #FED7D7', color:'#E53E3E',
+              }}
+            >✕</button>
+          </div>
         </div>
       </div>
     );
   }
 
   /* ─── Device group block (Gallery) ──────────────────────────── */
-  function GalleryGroup({deviceId, group, onDelete, onLightbox}) {
+  function GalleryGroup({deviceId, group, onDelete, onDeleteAll, onLightbox}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
@@ -676,15 +709,20 @@
             background:'#F7FAFC', borderRadius:'0 0 12px 12px',
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:10,
-            display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8,
           }}>
-            {group.images.map(img => (
-              <GalleryThumb
-                key={img.filename}
-                img={img} deviceId={deviceId}
-                onDelete={onDelete} onLightbox={onLightbox}
-              />
-            ))}
+            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:8}}>
+              {group.images.map(img => (
+                <GalleryThumb
+                  key={img.filename}
+                  img={img} deviceId={deviceId}
+                  onDelete={onDelete} onLightbox={onLightbox}
+                />
+              ))}
+            </div>
+            <button onClick={()=>onDeleteAll(deviceId)} style={{
+              width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+              border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+            }}>🗑 Delete All Gallery Images</button>
           </div>
         )}
       </div>
@@ -692,27 +730,45 @@
   }
 
   /* ─── Gallery Stats Card ─────────────────────────────────────── */
-  function GalleryStatsCard({deviceId, stats, onGetLatest, onGetByFolder, progress}) {
+  function GalleryStatsCard({deviceId, stats, onGetLatest, onGetByFolder, onFlexQuery, progress, deviceName}) {
     const [count, setCount] = useState(10);
     const [folder, setFolder] = useState('camera');
+    const [folderCount, setFolderCount] = useState(20);
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [fromDate, setFromDate] = useState('');
+    const [toDate, setToDate] = useState('');
+    const [advCount, setAdvCount] = useState(50);
+    const [advFolders, setAdvFolders] = useState([]);
     const dev = stats || {};
 
     const FOLDERS = ['camera','downloads','screenshots','whatsapp','telegram','instagram','facebook','twitter','snapchat','tiktok','saved'];
 
     const isWorking = progress && (progress.status === 'scanning' || progress.status === 'uploading');
 
+    const toggleAdvFolder = (f) => {
+      setAdvFolders(p => p.includes(f) ? p.filter(x=>x!==f) : [...p, f]);
+    };
+
+    const runFlexQuery = () => {
+      const params = { count: advCount };
+      if (fromDate) params.fromDate = new Date(fromDate).getTime();
+      if (toDate) params.toDate = new Date(toDate + 'T23:59:59').getTime();
+      if (advFolders.length > 0) params.folders = advFolders;
+      onFlexQuery(deviceId, params);
+    };
+
     return (
       <Card style={{padding:16, marginBottom:12}}>
         <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:10}}>
           <span style={{fontSize:16}}>🖼</span>
           <span style={{fontSize:14, fontWeight:700, color:'#2D3748'}}>
-            Gallery Stats: {deviceId.slice(0,12)}…
+            {deviceName || deviceId.slice(0,12) + '…'}
           </span>
         </div>
 
         {dev.totalImages !== undefined ? (
           <div>
-            <div style={{display:'flex', flexWrap:'wrap', gap:8, marginBottom:12}}>
+            <div style={{display:'flex', flexWrap:'wrap', gap:6, marginBottom:12}}>
               <Pill color="#E67E22">{dev.totalImages} images</Pill>
               <Pill color="#4A90A4">{dev.totalSizeMB || Math.round((dev.totalSizeBytes||0)/1048576)} MB</Pill>
               <Pill color="#7B68AE">{dev.folderCount || (dev.folders||[]).length} folders</Pill>
@@ -734,30 +790,101 @@
               </div>
             )}
 
-            {/* Get latest images */}
+            {/* Quick: Get latest images */}
+            <div style={{fontSize:11, fontWeight:700, color:'#718096', marginBottom:4, textTransform:'uppercase', letterSpacing:0.5}}>Quick Fetch</div>
             <div style={{display:'flex', gap:6, marginBottom:8, flexWrap:'wrap'}}>
               <select value={count} onChange={e=>setCount(Number(e.target.value))}
-                style={{height:36, padding:'0 8px', fontSize:13, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
+                style={{height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
                 <option value={5}>5</option>
                 <option value={10}>10</option>
                 <option value={20}>20</option>
                 <option value={50}>50</option>
               </select>
               <Btn sm color="#E67E22" onClick={()=>onGetLatest(deviceId, count, true)} disabled={isWorking}>
-                {isWorking ? '⏳ Working…' : `⬇ Get Latest ${count}`}
+                {isWorking ? '⏳ …' : `⬇ Latest ${count}`}
               </Btn>
             </div>
 
-            {/* Get by folder */}
-            <div style={{display:'flex', gap:6, flexWrap:'wrap'}}>
+            {/* Quick: Get by folder */}
+            <div style={{display:'flex', gap:6, marginBottom:8, flexWrap:'wrap'}}>
               <select value={folder} onChange={e=>setFolder(e.target.value)}
-                style={{flex:1, minWidth:0, height:36, padding:'0 8px', fontSize:13, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
+                style={{flex:1, minWidth:0, height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
                 {FOLDERS.map(f => <option key={f} value={f}>{f}</option>)}
               </select>
-              <Btn sm outline color="#E67E22" onClick={()=>onGetByFolder(deviceId, folder, 20, true)} disabled={isWorking}>
-                📂 Get from folder
+              <select value={folderCount} onChange={e=>setFolderCount(Number(e.target.value))}
+                style={{height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+              <Btn sm outline color="#E67E22" onClick={()=>onGetByFolder(deviceId, folder, folderCount, true)} disabled={isWorking}>
+                📂 Folder
               </Btn>
             </div>
+
+            {/* Advanced / Flexible query toggle */}
+            <button onClick={()=>setShowAdvanced(!showAdvanced)} style={{
+              width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+              border:'1.5px solid #E67E2244', color:'#E67E22', background:'#FFF7ED',
+              cursor:'pointer', marginBottom: showAdvanced ? 8 : 0,
+            }}>
+              {showAdvanced ? '▲ Hide Advanced Query' : '▼ Advanced Query (Date Range, Multi-Folder)'}
+            </button>
+
+            {showAdvanced && (
+              <div style={{padding:12, borderRadius:10, background:'#FFFBF5', border:'1px solid #FEEBC8'}}>
+                {/* Date range */}
+                <div style={{fontSize:11, fontWeight:700, color:'#718096', marginBottom:4}}>Date Range</div>
+                <div style={{display:'flex', gap:6, marginBottom:10, flexWrap:'wrap'}}>
+                  <div style={{flex:1, minWidth:120}}>
+                    <div style={{fontSize:10, color:'#A0AEC0', marginBottom:2}}>From</div>
+                    <input type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)}
+                      style={{width:'100%', height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}} />
+                  </div>
+                  <div style={{flex:1, minWidth:120}}>
+                    <div style={{fontSize:10, color:'#A0AEC0', marginBottom:2}}>To</div>
+                    <input type="date" value={toDate} onChange={e=>setToDate(e.target.value)}
+                      style={{width:'100%', height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}} />
+                  </div>
+                </div>
+
+                {/* Folder multi-select */}
+                <div style={{fontSize:11, fontWeight:700, color:'#718096', marginBottom:4}}>Folders (select multiple, or none for all)</div>
+                <div style={{display:'flex', flexWrap:'wrap', gap:4, marginBottom:10}}>
+                  {FOLDERS.map(f => {
+                    const sel = advFolders.includes(f);
+                    return (
+                      <button key={f} onClick={()=>toggleAdvFolder(f)} style={{
+                        fontSize:11, padding:'4px 10px', borderRadius:6, cursor:'pointer',
+                        border: sel ? '1.5px solid #E67E22' : '1px solid #E2E8F0',
+                        background: sel ? '#FFF7ED' : '#FFF',
+                        color: sel ? '#E67E22' : '#718096', fontWeight: sel ? 700 : 400,
+                      }}>{f}</button>
+                    );
+                  })}
+                </div>
+
+                {/* Max count */}
+                <div style={{display:'flex', gap:6, alignItems:'center', marginBottom:10}}>
+                  <div style={{fontSize:11, fontWeight:700, color:'#718096'}}>Max images:</div>
+                  <select value={advCount} onChange={e=>setAdvCount(Number(e.target.value))}
+                    style={{height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={0}>All</option>
+                  </select>
+                </div>
+
+                <Btn full color="#E67E22" onClick={runFlexQuery} disabled={isWorking}>
+                  {isWorking ? '⏳ Working…' : '🔍 Fetch Gallery Images'}
+                </Btn>
+              </div>
+            )}
 
             {/* Progress */}
             {progress && progress.status === 'uploading' && (
@@ -767,10 +894,17 @@
                 </span>
               </div>
             )}
+            {progress && progress.status === 'scanning' && (
+              <div style={{marginTop:10, padding:'8px 12px', borderRadius:8, background:'#EBF8FF', border:'1px solid #BEE3F8'}}>
+                <span style={{fontSize:12, fontWeight:700, color:'#2B6CB0'}}>
+                  🔍 Scanning device gallery…
+                </span>
+              </div>
+            )}
           </div>
         ) : (
           <div style={{fontSize:13, color:'#A0AEC0', textAlign:'center', padding:'12px 0'}}>
-            {dev.hasPermission === false ? 'No gallery permission on device' : 'No stats received yet. Tap "Gallery" on the device card.'}
+            {dev.hasPermission === false ? 'No gallery permission on device' : 'Loading gallery stats…'}
           </div>
         )}
       </Card>
@@ -1017,7 +1151,7 @@
     // Gallery actions
     const getGalleryStats = (deviceId) => {
       socketRef.current.emit('get_gallery_stats', { targetDeviceId: deviceId });
-      showToast('Requesting gallery stats…', 'info');
+      setTab('gallery');
     };
     const getLatestImages = (deviceId, count=10, upload=false) => {
       const requestId = `req_${Date.now()}`;
@@ -1029,19 +1163,28 @@
       socketRef.current.emit('get_images_by_folder', { targetDeviceId:deviceId, folder, count, upload, requestId });
       setGalleryProgress(p => ({ ...p, [deviceId]: { status: upload?'uploading':'scanning' } }));
     };
-    const uploadGalleryImages = (deviceId, imageIds) => {
+    const flexGalleryQuery = (deviceId, params) => {
       const requestId = `req_${Date.now()}`;
-      socketRef.current.emit('upload_gallery_images', { targetDeviceId:deviceId, imageIds, requestId });
-      setGalleryProgress(p => ({ ...p, [deviceId]: { status:'uploading', total:imageIds.length, uploaded:0 } }));
+      socketRef.current.emit('get_gallery_images', {
+        targetDeviceId: deviceId,
+        count: params.count || 50,
+        fromDate: params.fromDate,
+        toDate: params.toDate,
+        folders: params.folders,
+        onlyMetadata: false,
+        requestId,
+      });
+      setGalleryProgress(p => ({ ...p, [deviceId]: { status:'uploading', total:params.count||'?', uploaded:0 } }));
     };
 
-    // Delete offline device
+    // Delete offline device + all its data
     const deleteDevice = async (deviceId) => {
-      if (!confirm('Remove this offline device from the list?')) return;
+      if (!confirm('Remove this offline device and ALL its data (recordings, screenshots, gallery)?')) return;
       try {
         const r = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, { method:'DELETE' });
         if (r.ok) {
-          showToast('Device removed from list', 'info');
+          showToast('Device and all data removed', 'info');
+          fetchRec(); fetchShot(); fetchGallery();
         } else {
           const d = await r.json();
           showToast(d.error || 'Failed to delete device', 'error');
@@ -1055,6 +1198,26 @@
       if (!confirm('Delete this gallery image?')) return;
       await fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       fetchGallery();
+    };
+
+    // Bulk delete all per device
+    const delAllRec = async (deviceId) => {
+      if (!confirm('Delete ALL recordings for this device?')) return;
+      await fetch(`/api/recordings/${encodeURIComponent(deviceId)}`, {method:'DELETE'});
+      fetchRec();
+      showToast('All recordings deleted', 'info');
+    };
+    const delAllShot = async (deviceId) => {
+      if (!confirm('Delete ALL screenshots for this device?')) return;
+      await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}`, {method:'DELETE'});
+      fetchShot();
+      showToast('All screenshots deleted', 'info');
+    };
+    const delAllGallery = async (deviceId) => {
+      if (!confirm('Delete ALL gallery images for this device?')) return;
+      await fetch(`/api/gallery/${encodeURIComponent(deviceId)}`, {method:'DELETE'});
+      fetchGallery();
+      showToast('All gallery images deleted', 'info');
     };
 
     const uploadApk = async (file) => {
@@ -1087,13 +1250,13 @@
       fetchShot();
     };
 
-    /* Tab button style */
+    /* Tab button style — compact for 5 tabs on mobile */
     const tabStyle = (active, color='#4A90A4') => ({
-      flex:1, padding:'11px 0', fontSize:13, fontWeight:600,
+      flex:'0 0 auto', padding:'10px 10px', fontSize:12, fontWeight:600,
       border:'none', background:'none', cursor:'pointer',
       color: active ? color : '#A0AEC0',
       borderBottom: `2.5px solid ${active ? color : 'transparent'}`,
-      marginBottom:-1, transition:'color .15s',
+      marginBottom:-1, transition:'color .15s', whiteSpace:'nowrap',
     });
 
     /* ── Render ── */
@@ -1136,38 +1299,29 @@
         <div style={{
           background:'#FFF', borderBottom:'1px solid #E2E8F0',
           display:'flex', position:'sticky', top:58, zIndex:190,
+          overflowX:'auto', WebkitOverflowScrolling:'touch',
+          scrollbarWidth:'none', msOverflowStyle:'none',
         }}>
-          <button style={tabStyle(tab==='devices')} onClick={()=>setTab('devices')}>
-            Devices
-            {devList.length>0 && (
-              <span style={{marginLeft:5,fontSize:10,background:'#4A90A4',color:'#FFF',
-                            padding:'1px 6px',borderRadius:10}}>{devList.length}</span>
-            )}
-          </button>
-          <button style={tabStyle(tab==='recordings')} onClick={()=>setTab('recordings')}>
-            Recordings
-            {totalRec>0 && (
-              <span style={{marginLeft:5,fontSize:10,background:'#4A90A4',color:'#FFF',
-                            padding:'1px 6px',borderRadius:10}}>{totalRec}</span>
-            )}
-          </button>
-          <button style={tabStyle(tab==='screenshots','#7B68AE')} onClick={()=>setTab('screenshots')}>
-            Screenshots
-            {totalShots>0 && (
-              <span style={{marginLeft:5,fontSize:10,background:'#7B68AE',color:'#FFF',
-                            padding:'1px 6px',borderRadius:10}}>{totalShots}</span>
-            )}
-          </button>
-          <button style={tabStyle(tab==='gallery','#E67E22')} onClick={()=>setTab('gallery')}>
-            Gallery
-            {totalGallery>0 && (
-              <span style={{marginLeft:5,fontSize:10,background:'#E67E22',color:'#FFF',
-                            padding:'1px 6px',borderRadius:10}}>{totalGallery}</span>
-            )}
-          </button>
-          <button style={tabStyle(tab==='app','#DD6B20')} onClick={()=>setTab('app')}>
-            App
-          </button>
+          {[
+            { id:'devices',     label:'Devices',     count:devList.length, color:'#4A90A4' },
+            { id:'recordings',  label:'Records',     count:totalRec,       color:'#4A90A4' },
+            { id:'screenshots', label:'Shots',        count:totalShots,     color:'#7B68AE' },
+            { id:'gallery',     label:'Gallery',     count:totalGallery,   color:'#E67E22' },
+            { id:'app',         label:'App',         count:0,              color:'#DD6B20' },
+          ].map(t => (
+            <button key={t.id} style={tabStyle(tab===t.id, t.color)} onClick={()=>{
+              setTab(t.id);
+              if (t.id === 'gallery' && socketRef.current) {
+                onlineDev.forEach(d => socketRef.current.emit('get_gallery_stats', { targetDeviceId: d.deviceId }));
+              }
+            }}>
+              {t.label}
+              {t.count>0 && (
+                <span style={{marginLeft:3,fontSize:9,background:t.color,color:'#FFF',
+                              padding:'1px 5px',borderRadius:8,verticalAlign:'middle'}}>{t.count}</span>
+              )}
+            </button>
+          ))}
         </div>
 
         {/* ── Toast ─────────────────────────────────────────── */}
@@ -1208,7 +1362,7 @@
             Object.keys(recordings).length === 0
               ? <Empty icon="🎙" title="No recordings yet" sub="Start a recording from the Devices tab" />
               : Object.entries(recordings).map(([id, g]) => (
-                  <RecGroup key={id} deviceId={id} group={g} onDelete={delRec} />
+                  <RecGroup key={id} deviceId={id} group={g} onDelete={delRec} onDeleteAll={delAllRec} />
                 ))
           )}
 
@@ -1217,7 +1371,7 @@
             Object.keys(screenshots).length === 0
               ? <Empty icon="🖼" title="No screenshots yet" sub="Take screenshots from the Devices tab" />
               : Object.entries(screenshots).map(([id, g]) => (
-                  <ShotGroup key={id} deviceId={id} group={g} onDelete={delShot} onLightbox={setLightbox} />
+                  <ShotGroup key={id} deviceId={id} group={g} onDelete={delShot} onDeleteAll={delAllShot} onLightbox={setLightbox} />
                 ))
           )}
 
@@ -1231,9 +1385,11 @@
                     <GalleryStatsCard
                       key={dev.deviceId}
                       deviceId={dev.deviceId}
+                      deviceName={dev.deviceName}
                       stats={galleryStats[dev.deviceId]}
                       onGetLatest={getLatestImages}
                       onGetByFolder={getImagesByFolder}
+                      onFlexQuery={flexGalleryQuery}
                       progress={galleryProgress[dev.deviceId]}
                     />
                   ))}
@@ -1244,7 +1400,7 @@
               {Object.keys(gallery).length === 0
                 ? <Empty icon="🖼" title="No gallery images yet" sub="Use the Gallery button on a device to fetch images" />
                 : Object.entries(gallery).map(([id, g]) => (
-                    <GalleryGroup key={id} deviceId={id} group={g} onDelete={delGallery} onLightbox={setLightbox} />
+                    <GalleryGroup key={id} deviceId={id} group={g} onDelete={delGallery} onDeleteAll={delAllGallery} onLightbox={setLightbox} />
                   ))
               }
             </div>

