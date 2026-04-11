@@ -901,6 +901,13 @@
                 </span>
               </div>
             )}
+            {progress && progress.status === 'paused' && (
+              <div style={{marginTop:10, padding:'8px 12px', borderRadius:8, background:'#FFFBEB', border:'1px solid #F6AD55'}}>
+                <span style={{fontSize:12, fontWeight:700, color:'#C05621'}}>
+                  ⏸ Upload paused — {progress.remaining||0} remaining ({progress.uploaded||0} uploaded, {progress.failed||0} failed)
+                </span>
+              </div>
+            )}
           </div>
         ) : (
           <div style={{fontSize:13, color:'#A0AEC0', textAlign:'center', padding:'12px 0'}}>
@@ -1086,6 +1093,12 @@
       socket.on('gallery_upload_error', d => {
         showToast(`Gallery upload error: ${d.error}`, 'error');
         setGalleryProgress(p => { const c={...p}; delete c[d.deviceId]; return c; });
+      });
+      socket.on('gallery_upload_paused', d => {
+        showToast(`Gallery upload paused: ${d.remaining} remaining (${d.reason||'connection lost'})`, 'warn');
+        setGalleryProgress(p => ({
+          ...p, [d.deviceId]: { ...p[d.deviceId], status:'paused', remaining:d.remaining, uploaded:d.uploaded||0, failed:d.failed||0 }
+        }));
       });
 
       fetchRec();
