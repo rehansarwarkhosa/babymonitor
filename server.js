@@ -28,6 +28,7 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 3000;
 const RECORDINGS_DIR = path.join(__dirname, "recordings");
 const SCREENSHOTS_DIR = path.join(__dirname, "screenshots");
+const GALLERY_DIR = path.join(__dirname, "gallery");
 const APK_DIR = path.join(__dirname, "apk");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
@@ -35,6 +36,9 @@ if (!fs.existsSync(RECORDINGS_DIR)) {
 }
 if (!fs.existsSync(SCREENSHOTS_DIR)) {
   fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+}
+if (!fs.existsSync(GALLERY_DIR)) {
+  fs.mkdirSync(GALLERY_DIR, { recursive: true });
 }
 if (!fs.existsSync(APK_DIR)) {
   fs.mkdirSync(APK_DIR, { recursive: true });
@@ -130,6 +134,38 @@ const screenshotUpload = multer({
     }
   },
 });
+
+// Gallery image upload multer config
+const galleryStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const tempDir = path.join(GALLERY_DIR, "_temp");
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    cb(null, tempDir);
+  },
+  filename: (req, file, cb) => {
+    const timestamp = Date.now();
+    const ext = path.extname(file.originalname);
+    const basename = path.basename(file.originalname, ext);
+    cb(null, `${basename}_${timestamp}${ext}`);
+  },
+});
+
+const galleryUpload = multer({
+  storage: galleryStorage,
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image files are allowed for gallery"));
+    }
+  },
+});
+
+// In-memory gallery image metadata store
+const galleryImages = new Map(); // deviceId -> [{ imageId, originalName, filename, folderName, dateTaken, size, requestId, uploadedAt }]
 
 // State
 const devices = new Map();
@@ -707,6 +743,270 @@ app.get("/api/devices/:deviceId/capabilities", (req, res) => {
   }
 });
 
+// ─── GALLERY IMAGE ENDPOINTS ──────────────────────────────
+
+// Upload gallery image from Android
+app.post("/upload-gallery", galleryUpload.single("gallery_image"), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No gallery image provided" });
+    }
+
+    const deviceId = req.body.deviceId || "unknown";
+    const deviceName = req.body.deviceName || "Unknown";
+    const imageId = req.body.imageId;
+    const originalName = req.body.originalName || req.file.originalname;
+    const dateTaken = req.body.dateTaken;
+    const folderName = req.body.folderName || "Unknown";
+    const fileSize = req.body.fileSize;
+    const requestId = req.body.requestId || "";
+
+    log(`Gallery image received from ${deviceName} (${deviceId}): ${originalName} (${folderName})`);
+
+    const deviceDir = path.join(GALLERY_DIR, deviceId);
+    if (!fs.existsSync(deviceDir)) {
+      fs.mkdirSync(deviceDir, { recursive: true });
+    }
+
+    const tempPath = req.file.path;
+    const finalFilename = req.file.filename;
+    const actualFinalPath = path.join(deviceDir, finalFilename);
+
+    fs.renameSync(tempPath, actualFinalPath);
+    const stats = fs.statSync(actualFinalPath);
+
+    log(`Gallery image saved: ${deviceId}/${finalFilename} (${stats.size} bytes)`);
+
+    // Store metadata in memory
+    if (!galleryImages.has(deviceId)) {
+      galleryImages.set(deviceId, []);
+    }
+    const galleryImage = {
+      deviceId,
+      deviceName,
+      imageId,
+      originalName,
+      filename: finalFilename,
+      folderName,
+      dateTaken: dateTaken ? new Date(parseInt(dateTaken)) : new Date(),
+      size: parseInt(fileSize) || stats.size,
+      requestId,
+      uploadedAt: new Date(),
+    };
+    galleryImages.get(deviceId).push(galleryImage);
+
+    // Emit to web clients
+    io.emit("gallery_image_received", {
+      deviceId,
+      deviceName,
+      imageId,
+      originalName,
+      folderName,
+      filename: finalFilename,
+      requestId,
+    });
+
+    return res.json({ success: true, filename: finalFilename });
+  } catch (error) {
+    log(`Gallery upload error: ${error.message}`);
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Serve gallery image file
+app.get("/api/gallery/image/:deviceId/:filename", (req, res) => {
+  const filePath = path.join(GALLERY_DIR, req.params.deviceId, req.params.filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Image not found" });
+  }
+  return res.sendFile(filePath);
+});
+
+// List all gallery images grouped by device (from filesystem)
+app.get("/api/gallery", (req, res) => {
+  try {
+    if (!fs.existsSync(GALLERY_DIR)) return res.json({});
+    const result = {};
+    const entries = fs.readdirSync(GALLERY_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "_temp" || !entry.isDirectory()) continue;
+      const deviceId = entry.name;
+      const deviceDir = path.join(GALLERY_DIR, deviceId);
+      const dev = devices.get(deviceId);
+      try {
+        const files = fs.readdirSync(deviceDir)
+          .filter(f => !f.startsWith("."))
+          .map(filename => {
+            const filePath = path.join(deviceDir, filename);
+            const stats = fs.statSync(filePath);
+            // Try to find metadata from in-memory store
+            const meta = (galleryImages.get(deviceId) || []).find(m => m.filename === filename);
+            return {
+              filename,
+              originalName: meta ? meta.originalName : filename,
+              folderName: meta ? meta.folderName : "Unknown",
+              dateTaken: meta ? meta.dateTaken : null,
+              size: stats.size,
+              created: stats.birthtime || stats.mtime,
+              url: `/api/gallery/image/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`,
+            };
+          })
+          .sort((a, b) => new Date(b.created) - new Date(a.created));
+        if (files.length > 0) {
+          result[deviceId] = {
+            deviceName: dev ? dev.deviceName : deviceId,
+            images: files,
+          };
+        }
+      } catch (e) {
+        log(`Error reading gallery folder ${deviceId}: ${e.message}`);
+      }
+    }
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to list gallery" });
+  }
+});
+
+// Get gallery images for a specific device
+app.get("/api/gallery/:deviceId", (req, res) => {
+  try {
+    const deviceDir = path.join(GALLERY_DIR, req.params.deviceId);
+    if (!fs.existsSync(deviceDir)) return res.json([]);
+    const files = fs.readdirSync(deviceDir)
+      .filter(f => !f.startsWith("."))
+      .map(filename => {
+        const filePath = path.join(deviceDir, filename);
+        const stats = fs.statSync(filePath);
+        const meta = (galleryImages.get(req.params.deviceId) || []).find(m => m.filename === filename);
+        return {
+          filename,
+          originalName: meta ? meta.originalName : filename,
+          folderName: meta ? meta.folderName : "Unknown",
+          dateTaken: meta ? meta.dateTaken : null,
+          size: stats.size,
+          created: stats.birthtime || stats.mtime,
+          url: `/api/gallery/image/${encodeURIComponent(req.params.deviceId)}/${encodeURIComponent(filename)}`,
+        };
+      })
+      .sort((a, b) => new Date(b.created) - new Date(a.created));
+    return res.json(files);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to list gallery images" });
+  }
+});
+
+// Delete a gallery image
+app.delete("/api/gallery/:deviceId/:filename", (req, res) => {
+  try {
+    const filePath = path.join(GALLERY_DIR, req.params.deviceId, req.params.filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "Gallery image not found" });
+    }
+    fs.unlinkSync(filePath);
+    // Remove from in-memory store
+    if (galleryImages.has(req.params.deviceId)) {
+      const arr = galleryImages.get(req.params.deviceId);
+      const idx = arr.findIndex(m => m.filename === req.params.filename);
+      if (idx !== -1) arr.splice(idx, 1);
+    }
+    log(`Gallery image deleted: ${req.params.deviceId}/${req.params.filename}`);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete gallery image" });
+  }
+});
+
+// Command device to get gallery stats
+app.post("/api/devices/:deviceId/gallery/stats", (req, res) => {
+  const dev = devices.get(req.params.deviceId);
+  if (dev && dev.isOnline && dev.socketId) {
+    io.to(dev.socketId).emit("get_gallery_stats", {
+      targetDeviceId: req.params.deviceId,
+    });
+    res.json({ success: true, message: "Stats request sent" });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
+// Command device to get latest images
+app.post("/api/devices/:deviceId/gallery/latest", (req, res) => {
+  const { count = 10, upload = false } = req.body;
+  const dev = devices.get(req.params.deviceId);
+  if (dev && dev.isOnline && dev.socketId) {
+    const requestId = `req_${Date.now()}`;
+    io.to(dev.socketId).emit("get_latest_images", {
+      targetDeviceId: req.params.deviceId,
+      count,
+      upload,
+      requestId,
+    });
+    res.json({ success: true, requestId });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
+// Command device to get images by date range
+app.post("/api/devices/:deviceId/gallery/by-date", (req, res) => {
+  const { fromDate, toDate, upload = false, maxCount = 50 } = req.body;
+  const dev = devices.get(req.params.deviceId);
+  if (dev && dev.isOnline && dev.socketId) {
+    const requestId = `req_${Date.now()}`;
+    io.to(dev.socketId).emit("get_images_by_date", {
+      targetDeviceId: req.params.deviceId,
+      fromDate,
+      toDate,
+      upload,
+      maxCount,
+      requestId,
+    });
+    res.json({ success: true, requestId });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
+// Command device to upload specific images by ID
+app.post("/api/devices/:deviceId/gallery/upload", (req, res) => {
+  const { imageIds } = req.body;
+  const dev = devices.get(req.params.deviceId);
+  if (!imageIds || !Array.isArray(imageIds)) {
+    return res.status(400).json({ error: "imageIds array required" });
+  }
+  if (dev && dev.isOnline && dev.socketId) {
+    const requestId = `req_${Date.now()}`;
+    io.to(dev.socketId).emit("upload_gallery_images", {
+      targetDeviceId: req.params.deviceId,
+      imageIds,
+      requestId,
+    });
+    res.json({ success: true, requestId, imagesRequested: imageIds.length });
+  } else {
+    res.status(404).json({ error: "Device not found or offline" });
+  }
+});
+
+// ─── DEVICE DELETE (offline only) ─────────────────────────
+
+app.delete("/api/devices/:deviceId", (req, res) => {
+  const dev = devices.get(req.params.deviceId);
+  if (!dev) {
+    return res.status(404).json({ error: "Device not found" });
+  }
+  if (dev.isOnline) {
+    return res.status(400).json({ error: "Cannot delete an online device" });
+  }
+  devices.delete(req.params.deviceId);
+  log(`Device removed from listing: ${dev.deviceName} (${req.params.deviceId})`);
+  broadcastDevices();
+  return res.json({ success: true });
+});
+
 // ─── APK MANAGEMENT ────────────────────────────────────────
 
 const APK_FILE = "app-debug.apk";
@@ -1277,6 +1577,168 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ─── Gallery monitoring events ──────────────────────────
+
+  socket.on("gallery_stats", (data) => {
+    try {
+      log(`Gallery stats from ${(data && data.deviceName) || "unknown"}: ${JSON.stringify(data.stats || {})}`);
+      io.emit("gallery_stats", data);
+    } catch (e) {
+      log(`Error in gallery_stats: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_scan_started", (data) => {
+    try {
+      log(`Gallery scan started on ${(data && data.deviceId) || "unknown"}`);
+      io.emit("gallery_scan_started", data);
+    } catch (e) {
+      log(`Error in gallery_scan_started: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_metadata", (data) => {
+    try {
+      log(`Received metadata for ${data.totalImages} images from ${(data && data.deviceName) || "unknown"}`);
+      io.emit("gallery_metadata", data);
+    } catch (e) {
+      log(`Error in gallery_metadata: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_scan_error", (data) => {
+    try {
+      log(`Gallery scan error: ${(data && data.error) || "Unknown"}`);
+      io.emit("gallery_scan_error", data);
+    } catch (e) {
+      log(`Error in gallery_scan_error: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_upload_started", (data) => {
+    try {
+      log(`Starting upload of ${data.totalImages} gallery images`);
+      io.emit("gallery_upload_started", data);
+    } catch (e) {
+      log(`Error in gallery_upload_started: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_upload_queued", (data) => {
+    try {
+      log(`Queued ${data.queuedImages}/${data.totalRequested} images for upload`);
+      io.emit("gallery_upload_queued", data);
+    } catch (e) {
+      log(`Error in gallery_upload_queued: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_image_uploaded", (data) => {
+    try {
+      log(`Gallery image uploaded: ${(data && data.name) || ""}`);
+      io.emit("gallery_image_uploaded", data);
+    } catch (e) {
+      log(`Error in gallery_image_uploaded: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_upload_complete", (data) => {
+    try {
+      log(`Gallery upload complete: ${data.uploaded} uploaded, ${data.failed} failed`);
+      io.emit("gallery_upload_complete", data);
+    } catch (e) {
+      log(`Error in gallery_upload_complete: ${e.message}`);
+    }
+  });
+
+  socket.on("gallery_upload_error", (data) => {
+    try {
+      log(`Gallery upload error: ${(data && data.error) || "Unknown"}`);
+      io.emit("gallery_upload_error", data);
+    } catch (e) {
+      log(`Error in gallery_upload_error: ${e.message}`);
+    }
+  });
+
+  // Gallery commands TO Android
+  socket.on("get_gallery_stats", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("get_gallery_stats", { targetDeviceId: targetId });
+        log(`Get gallery stats sent to ${dev.deviceName} (${targetId})`);
+      }
+    } catch (e) {
+      log(`Error in get_gallery_stats: ${e.message}`);
+    }
+  });
+
+  socket.on("get_latest_images", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("get_latest_images", data);
+        log(`Get latest images sent to ${dev.deviceName} (${targetId})`);
+      }
+    } catch (e) {
+      log(`Error in get_latest_images: ${e.message}`);
+    }
+  });
+
+  socket.on("get_images_by_date", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("get_images_by_date", data);
+        log(`Get images by date sent to ${dev.deviceName} (${targetId})`);
+      }
+    } catch (e) {
+      log(`Error in get_images_by_date: ${e.message}`);
+    }
+  });
+
+  socket.on("get_images_by_folder", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("get_images_by_folder", data);
+        log(`Get images by folder sent to ${dev.deviceName} (${targetId})`);
+      }
+    } catch (e) {
+      log(`Error in get_images_by_folder: ${e.message}`);
+    }
+  });
+
+  socket.on("get_gallery_images", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("get_gallery_images", data);
+        log(`Get gallery images sent to ${dev.deviceName} (${targetId})`);
+      }
+    } catch (e) {
+      log(`Error in get_gallery_images: ${e.message}`);
+    }
+  });
+
+  socket.on("upload_gallery_images", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dev = devices.get(targetId);
+      if (dev && dev.isOnline && dev.socketId) {
+        io.to(dev.socketId).emit("upload_gallery_images", data);
+        log(`Upload gallery images sent to ${dev.deviceName} (${targetId})`);
+      }
+    } catch (e) {
+      log(`Error in upload_gallery_images: ${e.message}`);
+    }
+  });
+
   socket.on("pong", (data) => {
     try {
       const deviceId = data && data.deviceId;
@@ -1342,7 +1804,7 @@ io.on("connection", (socket) => {
 
 // Clean up temp folders periodically (every hour)
 setInterval(() => {
-  [path.join(RECORDINGS_DIR, "_temp"), path.join(SCREENSHOTS_DIR, "_temp")].forEach((tempDir) => {
+  [path.join(RECORDINGS_DIR, "_temp"), path.join(SCREENSHOTS_DIR, "_temp"), path.join(GALLERY_DIR, "_temp")].forEach((tempDir) => {
     if (fs.existsSync(tempDir)) {
       try {
         const files = fs.readdirSync(tempDir);
