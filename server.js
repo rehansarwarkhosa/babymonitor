@@ -48,7 +48,15 @@ if (!fs.existsSync(APK_DIR)) {
 app.use(cors());
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ limit: '500mb', extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('index.html') || filePath.endsWith('sw.js')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 app.set("etag", false);
 
 // Extended timeout for slow-network uploads (30 minutes)
