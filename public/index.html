@@ -155,6 +155,65 @@
     );
   }
 
+  /* ─── Password Confirmation Modal ───────────────────────────── */
+  function PasswordModal({ prompt }) {
+    const [val, setVal] = useState('');
+    const [err, setErr] = useState(false);
+    const ref = useRef(null);
+    useEffect(() => {
+      if (prompt && ref.current) setTimeout(() => ref.current.focus(), 50);
+    }, [prompt]);
+    if (!prompt) return null;
+    const submit = () => {
+      if (val === '0000') { setVal(''); setErr(false); prompt.onOk(); }
+      else { setErr(true); setVal(''); ref.current && ref.current.focus(); }
+    };
+    const cancel = () => { setVal(''); setErr(false); prompt.onCancel(); };
+    return (
+      <div onClick={cancel} style={{
+        position:'fixed', inset:0, zIndex:800, background:'rgba(0,0,0,0.65)',
+        display:'flex', alignItems:'center', justifyContent:'center', padding:16,
+      }}>
+        <div onClick={e=>e.stopPropagation()} style={{
+          background:'#FFF', borderRadius:14, padding:22, maxWidth:340, width:'100%',
+          boxShadow:'0 10px 30px rgba(0,0,0,0.3)',
+        }}>
+          <div style={{fontSize:15, fontWeight:700, color:'#2D3748', marginBottom:6}}>
+            🔒 Confirm delete
+          </div>
+          <div style={{fontSize:13, color:'#4A5568', marginBottom:14}}>
+            {prompt.message}
+          </div>
+          <input
+            ref={ref}
+            type="password" inputMode="numeric" pattern="\d*" maxLength={4}
+            value={val} autoFocus
+            onChange={e=>{ setVal(e.target.value.replace(/\D/g,'').slice(0,4)); setErr(false); }}
+            onKeyDown={e=>{ if (e.key==='Enter') submit(); if (e.key==='Escape') cancel(); }}
+            placeholder="• • • •"
+            style={{
+              width:'100%', height:52, fontSize:26, textAlign:'center', letterSpacing:'0.5em',
+              padding:'0 16px', borderRadius:10,
+              border:`1.5px solid ${err?'#E53E3E':'#E2E8F0'}`,
+              marginBottom:6, background:'#F7FAFC', boxSizing:'border-box',
+            }}
+          />
+          {err && <div style={{fontSize:12, color:'#E53E3E', marginBottom:6}}>Incorrect password</div>}
+          <div style={{display:'flex', gap:10, marginTop:12}}>
+            <button onClick={cancel} style={{
+              flex:1, height:44, borderRadius:10, border:'1.5px solid #E2E8F0',
+              background:'#FFF', color:'#4A5568', fontWeight:600, fontSize:14, cursor:'pointer',
+            }}>No</button>
+            <button onClick={submit} style={{
+              flex:1, height:44, borderRadius:10, border:'none',
+              background:'#E53E3E', color:'#FFF', fontWeight:700, fontSize:14, cursor:'pointer',
+            }}>Yes</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   /* ─── Atom: Card ────────────────────────────────────────────── */
   function Card({children, accent, style:extra={}}) {
     return (
@@ -1030,6 +1089,15 @@
     useEffect(() => {
       try { localStorage.setItem('bm_favorites', JSON.stringify(favorites)); } catch {}
     }, [favorites]);
+    const [passPrompt, setPassPrompt] = useState(null);
+    const askPassword = (message) => new Promise(resolve => {
+      setPassPrompt({
+        message,
+        onOk:     () => { setPassPrompt(null); resolve(true); },
+        onCancel: () => { setPassPrompt(null); resolve(false); },
+      });
+    });
+
     const isFav = (kind, deviceId, filename) =>
       !!(favorites[kind]?.[deviceId]?.includes(filename));
     const addFav = (kind, deviceId, filename) => setFavorites(p => {
@@ -1307,18 +1375,41 @@
       setGalleryProgress(p => ({ ...p, [deviceId]: { status:'uploading', total:params.count||'?', uploaded:0 } }));
     };
 
-    // Delete offline device + all its data
+    // Delete offline device — PROTECTS FAVORITES (password required)
     const deleteDevice = async (deviceId) => {
-      if (!confirm('Remove this offline device and ALL its data (recordings, screenshots, gallery)?')) return;
+      const favRecs  = new Set(favorites.recordings?.[deviceId]  || []);
+      const favShots = new Set(favorites.screenshots?.[deviceId] || []);
+      const favGal   = new Set(favorites.gallery?.[deviceId]     || []);
+      const hasFavs  = favRecs.size + favShots.size + favGal.size > 0;
+
+      const msg = hasFavs
+        ? 'Remove this offline device? Favorites will be preserved. Enter password 0000 to confirm.'
+        : 'Remove this offline device and ALL its data? Enter password 0000 to confirm.';
+      if (!(await askPassword(msg))) return;
+
+      const recs  = recordings[deviceId]?.recordings   || [];
+      const shots = screenshots[deviceId]?.screenshots || [];
+      const imgs  = gallery[deviceId]?.images          || [];
+
       try {
-        const r = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, { method:'DELETE' });
-        if (r.ok) {
-          showToast('Device and all data removed', 'info');
-          fetchRec(); fetchShot(); fetchGallery();
+        await Promise.all([
+          ...recs .filter(r => !favRecs .has(r.filename)).map(r => fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(r.filename)}`,      {method:'DELETE'})),
+          ...shots.filter(s => !favShots.has(s.filename)).map(s => fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(s.filename)}`, {method:'DELETE'})),
+          ...imgs .filter(i => !favGal  .has(i.filename)).map(i => fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(i.filename)}`,     {method:'DELETE'})),
+        ]);
+
+        if (!hasFavs) {
+          const r = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, { method:'DELETE' });
+          if (r.ok) {
+            showToast('Device and all data removed', 'info');
+          } else {
+            const d = await r.json();
+            showToast(d.error || 'Failed to delete device', 'error');
+          }
         } else {
-          const d = await r.json();
-          showToast(d.error || 'Failed to delete device', 'error');
+          showToast('Device data cleared — favorites preserved', 'info');
         }
+        fetchRec(); fetchShot(); fetchGallery();
       } catch(e) {
         showToast('Failed to delete device', 'error');
       }
@@ -1330,24 +1421,59 @@
       fetchGallery();
     };
 
-    // Bulk delete all per device
+    // Bulk delete per device — PROTECTS FAVORITES
     const delAllRec = async (deviceId) => {
-      if (!confirm('Delete ALL recordings for this device?')) return;
-      await fetch(`/api/recordings/${encodeURIComponent(deviceId)}`, {method:'DELETE'});
+      const favs = new Set(favorites.recordings?.[deviceId] || []);
+      const list = (recordings[deviceId]?.recordings || []).filter(r => !favs.has(r.filename));
+      if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
+      if (!confirm(`Delete ${list.length} recording(s)? Favorites will be kept.`)) return;
+      await Promise.all(list.map(r =>
+        fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(r.filename)}`, {method:'DELETE'})
+      ));
       fetchRec();
-      showToast('All recordings deleted', 'info');
+      showToast(`Deleted ${list.length} recording(s)`, 'info');
     };
     const delAllShot = async (deviceId) => {
-      if (!confirm('Delete ALL screenshots for this device?')) return;
-      await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}`, {method:'DELETE'});
+      const favs = new Set(favorites.screenshots?.[deviceId] || []);
+      const list = (screenshots[deviceId]?.screenshots || []).filter(s => !favs.has(s.filename));
+      if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
+      if (!confirm(`Delete ${list.length} screenshot(s)? Favorites will be kept.`)) return;
+      await Promise.all(list.map(s =>
+        fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(s.filename)}`, {method:'DELETE'})
+      ));
       fetchShot();
-      showToast('All screenshots deleted', 'info');
+      showToast(`Deleted ${list.length} screenshot(s)`, 'info');
     };
     const delAllGallery = async (deviceId) => {
-      if (!confirm('Delete ALL gallery images for this device?')) return;
-      await fetch(`/api/gallery/${encodeURIComponent(deviceId)}`, {method:'DELETE'});
+      const favs = new Set(favorites.gallery?.[deviceId] || []);
+      const list = (gallery[deviceId]?.images || []).filter(i => !favs.has(i.filename));
+      if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
+      if (!confirm(`Delete ${list.length} image(s)? Favorites will be kept.`)) return;
+      await Promise.all(list.map(i =>
+        fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(i.filename)}`, {method:'DELETE'})
+      ));
       fetchGallery();
-      showToast('All gallery images deleted', 'info');
+      showToast(`Deleted ${list.length} image(s)`, 'info');
+    };
+
+    // Favorite deletion — password protected
+    const delFavRec = async (deviceId, filename) => {
+      if (!(await askPassword('Delete this favorite recording? Enter password 0000 to confirm.'))) return;
+      await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+      removeFav('recordings', deviceId, filename);
+      fetchRec();
+    };
+    const delFavShot = async (deviceId, filename) => {
+      if (!(await askPassword('Delete this favorite screenshot? Enter password 0000 to confirm.'))) return;
+      await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+      removeFav('screenshots', deviceId, filename);
+      fetchShot();
+    };
+    const delFavGallery = async (deviceId, filename) => {
+      if (!(await askPassword('Delete this favorite image? Enter password 0000 to confirm.'))) return;
+      await fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+      removeFav('gallery', deviceId, filename);
+      fetchGallery();
     };
 
     const uploadApk = async (file) => {
@@ -1526,15 +1652,15 @@
                     <div key={id}>
                       {favRec[id] && (
                         <RecGroup deviceId={id} group={favRec[id]}
-                          onDelete={delRec} inFavorites />
+                          onDelete={delFavRec} inFavorites />
                       )}
                       {favShot[id] && (
                         <ShotGroup deviceId={id} group={favShot[id]}
-                          onDelete={delShot} onLightbox={setLightbox} inFavorites />
+                          onDelete={delFavShot} onLightbox={setLightbox} inFavorites />
                       )}
                       {favGallery[id] && (
                         <GalleryGroup deviceId={id} group={favGallery[id]}
-                          onDelete={delGallery} onLightbox={setLightbox} inFavorites />
+                          onDelete={delFavGallery} onLightbox={setLightbox} inFavorites />
                       )}
                     </div>
                   ));
@@ -1699,6 +1825,9 @@
             </Btn>
           </div>
         )}
+
+        {/* ── Password modal ────────────────────────────────── */}
+        <PasswordModal prompt={passPrompt} />
 
         {/* ── Lightbox ──────────────────────────────────────── */}
         {lightbox && (
