@@ -30,6 +30,7 @@ const RECORDINGS_DIR = path.join(__dirname, "recordings");
 const SCREENSHOTS_DIR = path.join(__dirname, "screenshots");
 const GALLERY_DIR = path.join(__dirname, "gallery");
 const APK_DIR = path.join(__dirname, "apk");
+const FAVORITES_FILE = path.join(__dirname, "favorites.json");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -1192,6 +1193,44 @@ app.delete("/api/devices/:deviceId", (req, res) => {
   log(`Device removed with all data (${deletedFiles} files): ${dev.deviceName} (${deviceId})`);
   broadcastDevices();
   return res.json({ success: true, deletedFiles });
+});
+
+// ─── FAVORITES (server-side, shared across all browsers) ────
+
+function loadFavorites() {
+  try { return JSON.parse(fs.readFileSync(FAVORITES_FILE, "utf8")); }
+  catch { return {}; }
+}
+function saveFavorites(data) {
+  fs.writeFileSync(FAVORITES_FILE, JSON.stringify(data, null, 2));
+}
+
+app.get("/api/favorites", (req, res) => {
+  res.json(loadFavorites());
+});
+
+app.post("/api/favorites", (req, res) => {
+  const { kind, deviceId, filename } = req.body;
+  if (!kind || !deviceId || !filename) return res.status(400).json({ error: "Missing fields" });
+  const favs = loadFavorites();
+  if (!favs[kind]) favs[kind] = {};
+  if (!favs[kind][deviceId]) favs[kind][deviceId] = [];
+  if (!favs[kind][deviceId].includes(filename)) favs[kind][deviceId].push(filename);
+  saveFavorites(favs);
+  res.json({ success: true });
+});
+
+app.delete("/api/favorites", (req, res) => {
+  const { kind, deviceId, filename } = req.body;
+  if (!kind || !deviceId || !filename) return res.status(400).json({ error: "Missing fields" });
+  const favs = loadFavorites();
+  if (favs[kind]?.[deviceId]) {
+    favs[kind][deviceId] = favs[kind][deviceId].filter(f => f !== filename);
+    if (!favs[kind][deviceId].length) delete favs[kind][deviceId];
+    if (!Object.keys(favs[kind]).length) delete favs[kind];
+  }
+  saveFavorites(favs);
+  res.json({ success: true });
 });
 
 // ─── APK MANAGEMENT ────────────────────────────────────────

