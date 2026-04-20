@@ -696,7 +696,9 @@ app.post("/api/recordings/:deviceId/:filename/enhance", (req, res) => {
     if (!fs.existsSync(inputPath)) {
       return res.status(404).json({ error: "Recording not found" });
     }
-    const outFilename = "NC-" + filename;
+    // Output is always .mp3 (libmp3lame) regardless of input extension.
+    const baseNoExt = filename.replace(/\.[^.]+$/, "");
+    const outFilename = "NC-" + baseNoExt + ".mp3";
     const outputPath = path.join(deviceDir, outFilename);
     if (fs.existsSync(outputPath)) {
       return res.json({ success: true, filename: outFilename, alreadyExists: true });
@@ -710,7 +712,10 @@ app.post("/api/recordings/:deviceId/:filename/enhance", (req, res) => {
     // Strength: 0..100 (default 70). Higher = more aggressive denoise, stronger normalization.
     const strength = Math.max(0, Math.min(100, Number(req.body?.strength) || 70));
     const nr = 12 + (strength / 100) * 25;          // 12..37
-    const nf = -30 + (strength / 100) * 15;         // -30..-15 dB noise floor
+    // afftdn nf range is [-80, -20]. Stronger denoise = lower (more negative) nf.
+    let nf = -25 - (strength / 100) * 30;            // -25..-55 dB noise floor
+    if (nf > -20.001) nf = -20.001;
+    if (nf < -80)     nf = -80;
     const hp = 80 + (strength / 100) * 100;         // 80..180 Hz
     const lp = 7000;                                // keep intelligibility up to 7k
     const speechE = (6 + (strength / 100) * 8).toFixed(1); // 6..14 dB expansion
@@ -761,8 +766,23 @@ app.post("/api/recordings/:deviceId/:filename/enhance", (req, res) => {
         return;
       }
       log(`Enhance ok: ${jobKey} → ${outFilename}`);
-      io.emit("recording_enhanced", { deviceId, original: filename, filename: outFilename });
-      if (!res.headersSent) return res.json({ success: true, filename: outFilename });
+      // If the source was favorited, auto-favorite the enhanced copy so it shows up in Favorites tab.
+      let favorited = false;
+      try {
+        const favs = loadFavorites();
+        const list = favs?.recordings?.[deviceId] || [];
+        if (list.includes(filename)) {
+          if (!favs.recordings) favs.recordings = {};
+          if (!favs.recordings[deviceId]) favs.recordings[deviceId] = [];
+          if (!favs.recordings[deviceId].includes(outFilename)) {
+            favs.recordings[deviceId].push(outFilename);
+            saveFavorites(favs);
+            favorited = true;
+          }
+        }
+      } catch (e) { log(`Auto-fav after enhance failed: ${e.message}`); }
+      io.emit("recording_enhanced", { deviceId, original: filename, filename: outFilename, favorited });
+      if (!res.headersSent) return res.json({ success: true, filename: outFilename, favorited });
     });
   } catch (err) {
     log(`Enhance error: ${err.message}`);

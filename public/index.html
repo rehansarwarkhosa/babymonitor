@@ -2038,7 +2038,10 @@
 
       socket.on('devices_update',     setDevices);
       socket.on('new_recording',      fetchRec);
-      socket.on('recording_enhanced', fetchRec);
+      socket.on('recording_enhanced', (d) => {
+        fetchRec();
+        if (d && d.favorited) fetchFavorites();
+      });
       socket.on('screenshot_uploaded', d => {
         fetchShot();
         if (d && d.deviceId) setSsStatus(p => { const c={...p}; delete c[d.deviceId]; return c; });
@@ -2382,10 +2385,13 @@
           showToast(data.error || 'Enhancement failed', 'error');
         } else if (data.alreadyExists) {
           showToast('Enhanced copy already exists', 'info');
+        } else if (data.favorited) {
+          showToast(`✅ Saved as ${data.filename} — added to Favorites`, 'info');
         } else {
           showToast(`✅ Saved as ${data.filename}`, 'info');
         }
         fetchRec();
+        if (data.favorited) fetchFavorites();
       } catch {
         showToast('Network error during enhancement', 'error');
       } finally {
