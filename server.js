@@ -47,13 +47,19 @@ function downloadFile(url, destPath, redirectsLeft = 5) {
 }
 
 function validateRnnoiseModel(p) {
-  // GregorR .rnnn files are plain-text float grids, ~85 KB, starting with digits/sign/space.
+  // GregorR .rnnn files are ASCII text, ~30–200 KB. They may begin with an
+  // "rnnoise-nu model file …" header line or go straight into the float grid.
+  // We reject obvious failure modes (empty, binary, HTML error page).
   try {
     const st = fs.statSync(p);
-    if (st.size < 50000 || st.size > 500000) return false;
-    const head = fs.readFileSync(p, { encoding: "utf8", flag: "r" }).slice(0, 200);
-    // Must be ASCII floats separated by whitespace (digits, '-', '.', 'e', space, newline)
-    return /^[\s\-0-9.eE]+$/.test(head) && head.trim().length > 20;
+    if (st.size < 20000 || st.size > 2_000_000) return false;
+    const head = fs.readFileSync(p, { encoding: "utf8", flag: "r" }).slice(0, 400);
+    // Must be ASCII, must not be an HTML error page
+    if (/[^\x09\x0A\x0D\x20-\x7E]/.test(head)) return false; // non-printable = binary
+    if (/<html|<!doctype|<head|<body/i.test(head)) return false;
+    // Must contain at least a few numbers (digits and a decimal or exponent)
+    const numHits = (head.match(/-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/g) || []).length;
+    return numHits >= 5;
   } catch { return false; }
 }
 
