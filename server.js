@@ -588,6 +588,36 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: Date.now() });
 });
 
+// Storage usage — sums sizes of recordings, screenshots, gallery dirs
+function dirSizeBytes(dir) {
+  let total = 0;
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      try {
+        if (e.isDirectory()) total += dirSizeBytes(p);
+        else if (e.isFile()) total += fs.statSync(p).size;
+      } catch {}
+    }
+  } catch {}
+  return total;
+}
+let _storageCache = { at: 0, data: null };
+app.get("/api/storage", (req, res) => {
+  const now = Date.now();
+  if (_storageCache.data && now - _storageCache.at < 10000) {
+    return res.json(_storageCache.data);
+  }
+  const recordings  = dirSizeBytes(RECORDINGS_DIR);
+  const screenshots = dirSizeBytes(SCREENSHOTS_DIR);
+  const gallery     = dirSizeBytes(GALLERY_DIR);
+  const total = recordings + screenshots + gallery;
+  const data = { recordings, screenshots, gallery, total, timestamp: now };
+  _storageCache = { at: now, data };
+  res.json(data);
+});
+
 // List all devices
 app.get("/devices", (req, res) => {
   res.json(getDevicesSnapshot());

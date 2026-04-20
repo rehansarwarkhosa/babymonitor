@@ -166,6 +166,16 @@
   const saveCustomDurations = (arr) => {
     try { localStorage.setItem(CUSTOM_DUR_KEY, JSON.stringify(arr)); } catch {}
   };
+  const formatStorageBytes = (bytes) => {
+    const b = Number(bytes) || 0;
+    const GB = 1024 * 1024 * 1024;
+    const MB = 1024 * 1024;
+    const KB = 1024;
+    if (b >= GB) return `${(b / GB).toFixed(2)} GB`;
+    if (b >= MB) return `${(b / MB).toFixed(1)} MB`;
+    if (b >= KB) return `${(b / KB).toFixed(0)} KB`;
+    return `${b} B`;
+  };
   const formatDurationLabel = (sec) => {
     if (sec < 60) return `${sec} sec`;
     if (sec % 60 === 0) return `${sec/60} min`;
@@ -1821,26 +1831,26 @@
           <div style={{fontSize:12, color:'#718096', marginBottom:12}}>
             Add extra duration values to the Record dropdown. Presets are not changed.
           </div>
-          <div style={{display:'flex', gap:8, marginBottom:12}}>
+          <div style={{display:'flex', gap:8, marginBottom:8, width:'100%'}}>
             <input
               type="number" min="0" step="1" inputMode="numeric"
               placeholder="Min"
               value={newDurMin}
               onChange={e => setNewDurMin(e.target.value.replace(/\D/g,''))}
-              style={{flex:1, height:44, fontSize:14, padding:'0 12px', borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748'}}
+              style={{flex:1, minWidth:0, height:44, fontSize:14, padding:'0 10px', borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748'}}
             />
             <input
               type="number" min="0" max="59" step="1" inputMode="numeric"
               placeholder="Sec"
               value={newDurSec}
               onChange={e => setNewDurSec(e.target.value.replace(/\D/g,''))}
-              style={{flex:1, height:44, fontSize:14, padding:'0 12px', borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748'}}
+              style={{flex:1, minWidth:0, height:44, fontSize:14, padding:'0 10px', borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748'}}
             />
-            <button onClick={addCustomDuration} style={{
-              flexShrink:0, height:44, padding:'0 16px', borderRadius:10, border:'none',
-              background:'#4A90A4', color:'#FFF', fontWeight:700, fontSize:14, cursor:'pointer',
-            }}>+ Add</button>
           </div>
+          <button onClick={addCustomDuration} style={{
+            width:'100%', height:44, marginBottom:12, borderRadius:10, border:'none',
+            background:'#4A90A4', color:'#FFF', fontWeight:700, fontSize:14, cursor:'pointer',
+          }}>+ Add duration</button>
           {customDurations.length === 0 ? (
             <div style={{fontSize:12, color:'#A0AEC0', textAlign:'center', padding:'10px 0'}}>
               No custom durations yet.
@@ -2181,6 +2191,10 @@
     const fetchShot    = useCallback(async () => { try { setScreenshots(await (await fetch('/api/screenshots')).json()); } catch(e){} }, []);
     const fetchGallery = useCallback(async () => { try { setGallery(await (await fetch('/api/gallery')).json()); } catch(e){} }, []);
     const fetchApk     = useCallback(async () => { try { setApkInfo(await (await fetch('/api/apk/info')).json()); } catch(e){} }, []);
+    const [storage, setStorage] = useState(null);
+    const fetchStorage = useCallback(async () => {
+      try { setStorage(await (await fetch('/api/storage')).json()); } catch {}
+    }, []);
 
     /* Socket setup */
     useEffect(() => {
@@ -2311,13 +2325,15 @@
       fetchApk();
       fetchFavorites();
       fetchNotes();
+      fetchStorage();
+      const storageInterval = setInterval(fetchStorage, 30000);
       const reconcileInterval = setInterval(() => {
         fetch('/devices').then(r => r.ok ? r.json() : null).then(snap => {
           if (snap && typeof snap === 'object') setDevices(snap);
         }).catch(()=>{});
       }, 8000);
-      return () => { clearInterval(reconcileInterval); socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
-    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, showToast]);
+      return () => { clearInterval(reconcileInterval); clearInterval(storageInterval); socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
+    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, fetchStorage, showToast]);
 
     /* Timer helpers */
     const startTimer = useCallback((id, sec) => {
@@ -2618,6 +2634,14 @@
               {connected
                 ? `${onlineDev.length} device${onlineDev.length!==1?'s':''} online`
                 : 'Connecting…'}
+              {storage && (
+                <span
+                  title={`Recordings ${formatStorageBytes(storage.recordings)} • Screenshots ${formatStorageBytes(storage.screenshots)} • Gallery ${formatStorageBytes(storage.gallery)}`}
+                  style={{marginLeft:8, color:'#CBD5E0'}}
+                >
+                  · 💾 {formatStorageBytes(storage.total)}
+                </span>
+              )}
             </div>
           </div>
           <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', justifyContent:'flex-end'}}>
