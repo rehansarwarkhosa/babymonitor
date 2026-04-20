@@ -154,6 +154,24 @@
     {label:'10 min', value:600},{label:'15 min', value:900},
   ];
 
+  const CUSTOM_DUR_KEY = 'bm_custom_durations';
+  const loadCustomDurations = () => {
+    try {
+      const raw = localStorage.getItem(CUSTOM_DUR_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.filter(n => Number.isFinite(n) && n > 0) : [];
+    } catch { return []; }
+  };
+  const saveCustomDurations = (arr) => {
+    try { localStorage.setItem(CUSTOM_DUR_KEY, JSON.stringify(arr)); } catch {}
+  };
+  const formatDurationLabel = (sec) => {
+    if (sec < 60) return `${sec} sec`;
+    if (sec % 60 === 0) return `${sec/60} min`;
+    return `${Math.floor(sec/60)}m ${sec%60}s`;
+  };
+
   /* ─── Atom: StatusDot ───────────────────────────────────────── */
   function Dot({online, recording, size=10}) {
     const c = recording ? '#E53E3E' : online ? '#38A169' : '#CBD5E0';
@@ -1622,7 +1640,24 @@
   }
 
   /* ─── Settings screen ───────────────────────────────────────── */
-  function SettingsScreen({ authCfg, onUpdated, onToast, onLogout }) {
+  function SettingsScreen({ authCfg, onUpdated, onToast, onLogout, customDurations = [], onCustomDurationsChange }) {
+    const [newDurMin, setNewDurMin] = useState('');
+    const [newDurSec, setNewDurSec] = useState('');
+    const presetVals = new Set(DURATIONS.map(d => d.value));
+    const addCustomDuration = () => {
+      const m = parseInt(newDurMin || '0', 10) || 0;
+      const s = parseInt(newDurSec || '0', 10) || 0;
+      const total = m * 60 + s;
+      if (total <= 0) { onToast('Enter a duration > 0', 'error'); return; }
+      if (presetVals.has(total)) { onToast('Already a preset', 'warn'); return; }
+      if (customDurations.includes(total)) { onToast('Already added', 'warn'); return; }
+      onCustomDurationsChange([...customDurations, total].sort((a,b)=>a-b));
+      setNewDurMin(''); setNewDurSec('');
+      onToast('Duration added', 'info');
+    };
+    const removeCustomDuration = (v) => {
+      onCustomDurationsChange(customDurations.filter(x => x !== v));
+    };
     const [cur, setCur]   = useState('');
     const [n1, setN1]     = useState('');
     const [n2, setN2]     = useState('');
@@ -1774,6 +1809,59 @@
             background: cfgBusy ? '#A0AEC0' : '#4A90A4', color:'#FFF',
             fontWeight:700, fontSize:14, cursor: cfgBusy ? 'not-allowed' : 'pointer',
           }}>{cfgBusy ? 'Saving…' : 'Save settings'}</button>
+        </div>
+
+        <div style={{
+          background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
+          boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+        }}>
+          <div style={{fontSize:16, fontWeight:700, color:'#2D3748', marginBottom:6}}>
+            ⏲ Custom Recording Durations
+          </div>
+          <div style={{fontSize:12, color:'#718096', marginBottom:12}}>
+            Add extra duration values to the Record dropdown. Presets are not changed.
+          </div>
+          <div style={{display:'flex', gap:8, marginBottom:12}}>
+            <input
+              type="number" min="0" step="1" inputMode="numeric"
+              placeholder="Min"
+              value={newDurMin}
+              onChange={e => setNewDurMin(e.target.value.replace(/\D/g,''))}
+              style={{flex:1, height:44, fontSize:14, padding:'0 12px', borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748'}}
+            />
+            <input
+              type="number" min="0" max="59" step="1" inputMode="numeric"
+              placeholder="Sec"
+              value={newDurSec}
+              onChange={e => setNewDurSec(e.target.value.replace(/\D/g,''))}
+              style={{flex:1, height:44, fontSize:14, padding:'0 12px', borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748'}}
+            />
+            <button onClick={addCustomDuration} style={{
+              flexShrink:0, height:44, padding:'0 16px', borderRadius:10, border:'none',
+              background:'#4A90A4', color:'#FFF', fontWeight:700, fontSize:14, cursor:'pointer',
+            }}>+ Add</button>
+          </div>
+          {customDurations.length === 0 ? (
+            <div style={{fontSize:12, color:'#A0AEC0', textAlign:'center', padding:'10px 0'}}>
+              No custom durations yet.
+            </div>
+          ) : (
+            <div style={{display:'flex', flexWrap:'wrap', gap:8}}>
+              {customDurations.map(v => (
+                <div key={v} style={{
+                  display:'flex', alignItems:'center', gap:6,
+                  background:'#EDF2F7', borderRadius:8, padding:'6px 10px',
+                  fontSize:13, color:'#2D3748', fontWeight:600,
+                }}>
+                  <span>{formatDurationLabel(v)}</span>
+                  <button onClick={() => removeCustomDuration(v)} style={{
+                    border:'none', background:'transparent', color:'#E53E3E',
+                    cursor:'pointer', fontSize:16, lineHeight:1, padding:0,
+                  }} title="Remove">×</button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div style={{
@@ -1937,6 +2025,14 @@
     const [ssStatus,        setSsStatus]        = useState({});
     const [timers,          setTimers]          = useState({});
     const [duration,        setDuration]        = useState(60);
+    const [customDurations, setCustomDurations] = useState(loadCustomDurations);
+    const mergedDurations = React.useMemo(() => {
+      const seen = new Set(DURATIONS.map(d => d.value));
+      const extras = customDurations
+        .filter(v => !seen.has(v))
+        .map(v => ({ label: formatDurationLabel(v), value: v }));
+      return [...DURATIONS, ...extras].sort((a,b)=>a.value-b.value);
+    }, [customDurations]);
     const [tab,             setTab]             = useState(() => {
       try { return localStorage.getItem('bm_tab') || 'devices'; } catch { return 'devices'; }
     });
@@ -2215,7 +2311,12 @@
       fetchApk();
       fetchFavorites();
       fetchNotes();
-      return () => { socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
+      const reconcileInterval = setInterval(() => {
+        fetch('/devices').then(r => r.ok ? r.json() : null).then(snap => {
+          if (snap && typeof snap === 'object') setDevices(snap);
+        }).catch(()=>{});
+      }, 8000);
+      return () => { clearInterval(reconcileInterval); socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
     }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, showToast]);
 
     /* Timer helpers */
@@ -2241,13 +2342,32 @@
     }, []);
 
     /* Actions */
+    const reconcileDevices = useCallback(async () => {
+      try {
+        const r = await fetch('/devices');
+        if (!r.ok) return;
+        const snap = await r.json();
+        if (snap && typeof snap === 'object') setDevices(snap);
+      } catch {}
+    }, []);
     const record = (id) => {
       socketRef.current.emit('start_recording', { targetDeviceId:id, duration });
       startTimer(id, duration);
+      setDevices(p => {
+        const d = p[id]; if (!d) return p;
+        return { ...p, [id]: { ...d, isRecording: true, recordingStartTime: Date.now(), recordingDuration: duration } };
+      });
+      setTimeout(reconcileDevices, 1500);
+      setTimeout(reconcileDevices, 4000);
     };
     const stop   = (id) => {
       socketRef.current.emit('stop_recording',  { targetDeviceId:id });
       stopTimer(id);
+      setDevices(p => {
+        const d = p[id]; if (!d) return p;
+        return { ...p, [id]: { ...d, isRecording: false } };
+      });
+      setTimeout(reconcileDevices, 1500);
     };
     const shot   = (id) => {
       setSsStatus(p => ({ ...p, [id]: { status:'requesting' } }));
@@ -2796,6 +2916,8 @@
               onUpdated={onAuthUpdated}
               onToast={showToast}
               onLogout={onLogout}
+              customDurations={customDurations}
+              onCustomDurationsChange={(next)=>{ setCustomDurations(next); saveCustomDurations(next); }}
             />
           )}
         </div>
@@ -2811,7 +2933,7 @@
           }}>
             {/* Duration picker (dropdown + custom minutes input) */}
             <select
-              value={DURATIONS.some(d=>d.value===duration) ? duration : ''}
+              value={mergedDurations.some(d=>d.value===duration) ? duration : ''}
               onChange={e=>{ if (e.target.value) setDuration(Number(e.target.value)); }}
               style={{
                 flexShrink:0, height:44, padding:'0 8px', fontSize:13, fontWeight:600,
@@ -2820,7 +2942,7 @@
               }}
             >
               <option value="" disabled>Custom…</option>
-              {DURATIONS.map(d=><option key={d.value} value={d.value}>{d.label}</option>)}
+              {mergedDurations.map(d=><option key={d.value} value={d.value}>{d.label}</option>)}
             </select>
             <input
               type="number" min="1" step="1" inputMode="numeric"
