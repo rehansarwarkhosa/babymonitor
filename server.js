@@ -1687,7 +1687,7 @@ function saveNotes(data) {
   fs.writeFileSync(NOTES_FILE, JSON.stringify(data, null, 2));
 }
 
-const VALID_NOTE_KINDS = new Set(["recordings", "screenshots", "gallery"]);
+const VALID_NOTE_KINDS = new Set(["recordings", "screenshots", "gallery", "devices"]);
 
 app.get("/api/notes", (req, res) => {
   res.json(loadNotes());

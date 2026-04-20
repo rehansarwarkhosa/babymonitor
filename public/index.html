@@ -438,7 +438,7 @@
   }
 
   /* ─── Device Card ───────────────────────────────────────────── */
-  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, onSetAudioSource, onTestAudio, onDeleteDevice, onGetGalleryStats, timer, ssStatus, audioTesting}) {
+  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, onSetAudioSource, onTestAudio, onDeleteDevice, onGetGalleryStats, timer, ssStatus, audioTesting, note, onSaveNote}) {
     const [editing, setEditing] = useState(false);
     const [name, setName]       = useState(dev.deviceName);
     const [audioOpen, setAudioOpen] = useState(false);
@@ -568,6 +568,19 @@
             onTestSources={onTestAudio}
             testing={audioTesting}
           />
+        )}
+
+        {/* ── Device description / note ── */}
+        {onSaveNote && (
+          <div style={{padding:'0 14px 12px'}}>
+            <NoteWidget
+              kind="devices"
+              deviceId={dev.deviceId}
+              filename="_device"
+              note={note || ''}
+              onSave={onSaveNote}
+            />
+          </div>
         )}
       </Card>
     );
@@ -1477,37 +1490,60 @@
     const [busy, setBusy] = useState(false);
     const [apk, setApk]   = useState(null);
     const ref = useRef(null);
+    const lastTriedRef = useRef('');
 
     useEffect(() => {
       if (ref.current) setTimeout(() => ref.current.focus(), 50);
       fetch('/api/apk/info').then(r => r.json()).then(setApk).catch(()=>{});
     }, []);
 
-    const submit = async (e) => {
-      if (e) e.preventDefault();
-      if (busy) return;
-      setBusy(true); setErr('');
+    const doLogin = async (password, { silent = false } = {}) => {
+      if (busy) return { ok: false };
+      setBusy(true);
+      if (!silent) setErr('');
       try {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: val }),
+          body: JSON.stringify({ password }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          setErr(data.error || 'Incorrect password');
-          setVal('');
+          if (!silent) {
+            setErr(data.error || 'Incorrect password');
+            setVal('');
+            ref.current && ref.current.focus();
+          }
           setBusy(false);
-          ref.current && ref.current.focus();
-          return;
+          return { ok: false };
         }
         setToken(data.token, data.expiresAt);
         onLoggedIn(data);
-      } catch (e2) {
-        setErr('Network error');
+        return { ok: true };
+      } catch {
+        if (!silent) setErr('Network error');
         setBusy(false);
+        return { ok: false };
       }
     };
+
+    const submit = async (e) => {
+      if (e) e.preventDefault();
+      if (!val || busy) return;
+      await doLogin(val);
+    };
+
+    // Auto-submit silently on each keystroke (debounced) once ≥4 digits.
+    // If correct → unlock. If wrong → stay quiet, let user keep typing or press Unlock.
+    useEffect(() => {
+      if (busy) return;
+      if (val.length < 4) return;
+      if (val === lastTriedRef.current) return;
+      const tryPw = val;
+      lastTriedRef.current = tryPw;
+      const t = setTimeout(() => { doLogin(tryPw, { silent: true }); }, 180);
+      return () => clearTimeout(t);
+    }, [val, busy]);
 
     return (
       <div style={{
@@ -1841,10 +1877,17 @@
     const onLoggedIn = (data) => {
       setExpiresAt(data.expiresAt);
       setStatus(s => ({
+        ...(s || {}),
         enabled: true,
         authenticated: true,
         sessionTimeoutMinutes: data.sessionTimeoutMinutes || (s && s.sessionTimeoutMinutes) || 5,
+        expiresAt: data.expiresAt,
+        extended: false,
       }));
+      // Re-sync full settings (requireDeletePassword / lockDelete) after login
+      fetch('/api/auth/status').then(r => r.json()).then(s => {
+        setStatus(p => ({ ...(p || {}), ...s }));
+      }).catch(()=>{});
     };
 
     const onLogout = useCallback(async () => {
@@ -2580,6 +2623,8 @@
                     timer={timers[dev.deviceId]}
                     ssStatus={ssStatus[dev.deviceId]}
                     audioTesting={!!audioTesting[dev.deviceId]}
+                    note={notes.devices?.[dev.deviceId]?._device || ''}
+                    onSaveNote={saveNote}
                   />
                 ))
           )}
