@@ -694,7 +694,7 @@
 
   /* ─── Device group block (Recordings) ───────────────────────── */
   function RecGroup({deviceId, group, onDelete, onDeleteAll, onStar, favSet, inFavorites, notesMap, onSaveNote, onEnhance, enhancingEngines}) {
-    const [open, setOpen] = useState(true);
+    const [open, setOpen] = useState(false);
     const color = devColor(deviceId);
     return (
       <div style={{marginBottom:18}}>
@@ -806,7 +806,7 @@
 
   /* ─── Device group block (Screenshots) ──────────────────────── */
   function ShotGroup({deviceId, group, onDelete, onDeleteAll, onLightbox, onStar, favSet, inFavorites, notesMap, onSaveNote}) {
-    const [open, setOpen] = useState(true);
+    const [open, setOpen] = useState(false);
     const color = devColor(deviceId);
     return (
       <div style={{marginBottom:18}}>
@@ -923,7 +923,7 @@
 
   /* ─── Device group block (Gallery) ──────────────────────────── */
   function GalleryGroup({deviceId, group, onDelete, onDeleteAll, onLightbox, onStar, favSet, inFavorites, notesMap, onSaveNote}) {
-    const [open, setOpen] = useState(true);
+    const [open, setOpen] = useState(false);
     const color = devColor(deviceId);
     return (
       <div style={{marginBottom:18}}>
