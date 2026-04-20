@@ -73,6 +73,48 @@
 <script type="text/babel">
   const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
+  /* ─── Auth helpers ─────────────────────────────────────────── */
+  const AUTH_KEY = 'bm_auth_token';
+  const AUTH_EXP_KEY = 'bm_auth_expires';
+  const getToken = () => sessionStorage.getItem(AUTH_KEY) || null;
+  const getTokenExpiry = () => {
+    const v = sessionStorage.getItem(AUTH_EXP_KEY);
+    return v ? Number(v) : 0;
+  };
+  const setToken = (token, expiresAt) => {
+    if (token && expiresAt) {
+      sessionStorage.setItem(AUTH_KEY, token);
+      sessionStorage.setItem(AUTH_EXP_KEY, String(expiresAt));
+      const maxAge = Math.max(1, Math.floor((expiresAt - Date.now()) / 1000));
+      document.cookie = `auth_token=${encodeURIComponent(token)}; path=/; max-age=${maxAge}; SameSite=Strict`;
+    } else {
+      sessionStorage.removeItem(AUTH_KEY);
+      sessionStorage.removeItem(AUTH_EXP_KEY);
+      document.cookie = 'auth_token=; path=/; max-age=0; SameSite=Strict';
+    }
+  };
+
+  // Patch fetch once — inject Authorization header on all same-origin requests.
+  if (!window.__bmFetchPatched) {
+    const origFetch = window.fetch.bind(window);
+    window.fetch = (input, init = {}) => {
+      const t = getToken();
+      if (t) {
+        const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
+        if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + t);
+        init = { ...init, headers };
+      }
+      return origFetch(input, init).then(res => {
+        if (res.status === 401) {
+          // Global signal: session died.
+          window.dispatchEvent(new CustomEvent('bm-auth-expired'));
+        }
+        return res;
+      });
+    };
+    window.__bmFetchPatched = true;
+  }
+
   /* ─── Helpers ───────────────────────────────────────────────── */
   const fmtSize = (b) => {
     if (!b) return '0 B';
@@ -1070,8 +1112,353 @@
     );
   }
 
+  /* ─── Login screen ──────────────────────────────────────────── */
+  function LoginScreen({ onLoggedIn }) {
+    const [val, setVal]   = useState('');
+    const [err, setErr]   = useState('');
+    const [busy, setBusy] = useState(false);
+    const [apk, setApk]   = useState(null);
+    const ref = useRef(null);
+
+    useEffect(() => {
+      if (ref.current) setTimeout(() => ref.current.focus(), 50);
+      fetch('/api/apk/info').then(r => r.json()).then(setApk).catch(()=>{});
+    }, []);
+
+    const submit = async (e) => {
+      if (e) e.preventDefault();
+      if (busy) return;
+      setBusy(true); setErr('');
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: val }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setErr(data.error || 'Incorrect password');
+          setVal('');
+          setBusy(false);
+          ref.current && ref.current.focus();
+          return;
+        }
+        setToken(data.token, data.expiresAt);
+        onLoggedIn(data);
+      } catch (e2) {
+        setErr('Network error');
+        setBusy(false);
+      }
+    };
+
+    return (
+      <div style={{
+        minHeight:'100vh', background:'#0F2A35',
+        display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
+        padding:'24px',
+      }}>
+        <div style={{
+          background:'#FFF', borderRadius:16, padding:28, maxWidth:360, width:'100%',
+          boxShadow:'0 12px 40px rgba(0,0,0,0.45)',
+        }}>
+          <div style={{fontSize:48, textAlign:'center', marginBottom:6}}>🔒</div>
+          <div style={{
+            textAlign:'center', fontSize:15, fontWeight:700, color:'#2D3748', marginBottom:6,
+          }}>Enter Password</div>
+          <div style={{
+            textAlign:'center', fontSize:12, color:'#718096', marginBottom:18,
+          }}>This portal is private.</div>
+
+          {/* Form with autoComplete off + hidden decoy to stop browser suggestions */}
+          <form onSubmit={submit} autoComplete="off">
+            <input type="text" name="username" autoComplete="username"
+              style={{display:'none'}} tabIndex={-1} aria-hidden="true" readOnly />
+            <input
+              ref={ref}
+              type="password"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={12}
+              autoComplete="one-time-code"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              name="bm-otp"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-form-type="other"
+              value={val}
+              disabled={busy}
+              onChange={e => { setVal(e.target.value.replace(/\D/g,'').slice(0,12)); setErr(''); }}
+              placeholder="• • • •"
+              style={{
+                width:'100%', height:56, fontSize:26, textAlign:'center', letterSpacing:'0.5em',
+                padding:'0 16px', borderRadius:12,
+                border:`1.5px solid ${err ? '#E53E3E' : '#E2E8F0'}`,
+                background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748',
+              }}
+            />
+            {err && (
+              <div style={{fontSize:12, color:'#E53E3E', marginTop:8, textAlign:'center'}}>{err}</div>
+            )}
+            <button
+              type="submit"
+              disabled={busy || val.length < 4}
+              style={{
+                marginTop:14, width:'100%', height:48, borderRadius:12, border:'none',
+                background: (busy || val.length<4) ? '#A0AEC0' : '#4A90A4',
+                color:'#FFF', fontWeight:700, fontSize:15,
+                cursor: (busy || val.length<4) ? 'not-allowed' : 'pointer',
+              }}
+            >{busy ? 'Verifying…' : 'Unlock'}</button>
+          </form>
+        </div>
+
+        {/* Download APK — does NOT require authentication */}
+        {apk?.available && (
+          <a href="/api/apk/download" style={{
+            marginTop:18, display:'inline-flex', alignItems:'center', gap:8,
+            padding:'10px 18px', borderRadius:10,
+            background:'#38A169', color:'#FFF', fontSize:13, fontWeight:600,
+            textDecoration:'none', boxShadow:'0 2px 10px rgba(0,0,0,0.25)',
+          }}>⬇ Get Android App</a>
+        )}
+      </div>
+    );
+  }
+
+  /* ─── Settings screen ───────────────────────────────────────── */
+  function SettingsScreen({ authCfg, onUpdated, onToast, onLogout }) {
+    const [cur, setCur]   = useState('');
+    const [n1, setN1]     = useState('');
+    const [n2, setN2]     = useState('');
+    const [pwBusy, setPwBusy] = useState(false);
+    const [pwErr, setPwErr]   = useState('');
+    const [pwOk, setPwOk]     = useState('');
+
+    const [timeoutMin, setTimeoutMin] = useState(authCfg.sessionTimeoutMinutes);
+    const [enabled, setEnabled]       = useState(authCfg.enabled);
+    const [cfgBusy, setCfgBusy]       = useState(false);
+
+    useEffect(() => {
+      setTimeoutMin(authCfg.sessionTimeoutMinutes);
+      setEnabled(authCfg.enabled);
+    }, [authCfg]);
+
+    const changePassword = async () => {
+      setPwErr(''); setPwOk('');
+      if (n1 !== n2) { setPwErr('New passwords do not match'); return; }
+      if (!/^\d{4,12}$/.test(n1)) { setPwErr('New password must be 4–12 digits'); return; }
+      setPwBusy(true);
+      try {
+        const res = await fetch('/api/auth/change-password', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ current: cur, next: n1 }),
+        });
+        const data = await res.json();
+        if (!res.ok) { setPwErr(data.error || 'Failed'); setPwBusy(false); return; }
+        setPwOk('Password changed — please sign in again');
+        setPwBusy(false);
+        setCur(''); setN1(''); setN2('');
+        setTimeout(onLogout, 1200);
+      } catch { setPwErr('Network error'); setPwBusy(false); }
+    };
+
+    const saveCfg = async () => {
+      setCfgBusy(true);
+      try {
+        const res = await fetch('/api/auth/settings', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ sessionTimeoutMinutes: Number(timeoutMin), enabled }),
+        });
+        const data = await res.json();
+        if (!res.ok) { onToast(data.error || 'Failed', 'error'); setCfgBusy(false); return; }
+        onToast('Settings updated', 'info');
+        onUpdated(data);
+      } catch { onToast('Network error', 'error'); }
+      setCfgBusy(false);
+    };
+
+    const numInput = (value, onChange, placeholder, extra={}) => (
+      <input
+        type="password" inputMode="numeric" pattern="[0-9]*" maxLength={12}
+        autoComplete="one-time-code" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        data-lpignore="true" data-1p-ignore="true"
+        value={value}
+        onChange={e => onChange(e.target.value.replace(/\D/g,'').slice(0,12))}
+        placeholder={placeholder}
+        style={{
+          width:'100%', height:44, fontSize:16, textAlign:'center', letterSpacing:'0.35em',
+          padding:'0 12px', borderRadius:10, border:'1.5px solid #E2E8F0',
+          background:'#F7FAFC', boxSizing:'border-box', marginBottom:8, color:'#2D3748',
+          ...extra,
+        }}
+      />
+    );
+
+    return (
+      <div>
+        <div style={{
+          background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
+          boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+        }}>
+          <div style={{fontSize:16, fontWeight:700, color:'#2D3748', marginBottom:14}}>
+            🔐 Change Password
+          </div>
+          <form autoComplete="off" onSubmit={e=>{e.preventDefault();changePassword();}}>
+            <input type="text" style={{display:'none'}} />
+            <div style={{fontSize:12, color:'#718096', marginBottom:4}}>Current password</div>
+            {numInput(cur, setCur, '• • • •')}
+            <div style={{fontSize:12, color:'#718096', marginBottom:4, marginTop:4}}>New password (4–12 digits)</div>
+            {numInput(n1, setN1, '• • • •')}
+            <div style={{fontSize:12, color:'#718096', marginBottom:4, marginTop:4}}>Confirm new password</div>
+            {numInput(n2, setN2, '• • • •')}
+            {pwErr && <div style={{fontSize:12, color:'#E53E3E', marginTop:4}}>{pwErr}</div>}
+            {pwOk  && <div style={{fontSize:12, color:'#38A169', marginTop:4}}>{pwOk}</div>}
+            <button type="submit" disabled={pwBusy || !cur || !n1 || !n2} style={{
+              marginTop:10, width:'100%', height:44, borderRadius:10, border:'none',
+              background: (pwBusy || !cur || !n1 || !n2) ? '#A0AEC0' : '#4A90A4',
+              color:'#FFF', fontWeight:700, fontSize:14,
+              cursor:(pwBusy || !cur || !n1 || !n2) ? 'not-allowed' : 'pointer',
+            }}>{pwBusy ? 'Updating…' : 'Update password'}</button>
+          </form>
+        </div>
+
+        <div style={{
+          background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
+          boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+        }}>
+          <div style={{fontSize:16, fontWeight:700, color:'#2D3748', marginBottom:14}}>
+            ⏱ Session Settings
+          </div>
+          <label style={{display:'flex', alignItems:'center', gap:10, marginBottom:14, cursor:'pointer'}}>
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={e => setEnabled(e.target.checked)}
+              style={{width:18, height:18, cursor:'pointer'}}
+            />
+            <span style={{fontSize:14, color:'#2D3748'}}>Require password to open portal</span>
+          </label>
+          <div style={{fontSize:12, color:'#718096', marginBottom:4}}>Session timeout (minutes)</div>
+          <input
+            type="number"
+            min="1" max="1440" step="1" inputMode="numeric"
+            value={timeoutMin}
+            onChange={e => setTimeoutMin(e.target.value)}
+            style={{
+              width:'100%', height:44, fontSize:15, padding:'0 12px',
+              borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC',
+              boxSizing:'border-box', color:'#2D3748',
+            }}
+          />
+          <div style={{fontSize:11, color:'#A0AEC0', marginTop:6}}>
+            After this many minutes of inactivity, you'll need to re-enter the password.
+          </div>
+          <button onClick={saveCfg} disabled={cfgBusy} style={{
+            marginTop:12, width:'100%', height:44, borderRadius:10, border:'none',
+            background: cfgBusy ? '#A0AEC0' : '#4A90A4', color:'#FFF',
+            fontWeight:700, fontSize:14, cursor: cfgBusy ? 'not-allowed' : 'pointer',
+          }}>{cfgBusy ? 'Saving…' : 'Save settings'}</button>
+        </div>
+
+        <div style={{
+          background:'#FFF', borderRadius:14, padding:20,
+          boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+        }}>
+          <button onClick={onLogout} style={{
+            width:'100%', height:44, borderRadius:10, border:'1.5px solid #E53E3E',
+            background:'#FFF', color:'#E53E3E', fontWeight:700, fontSize:14, cursor:'pointer',
+          }}>🚪 Sign out</button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ─── Root gate: login vs app ──────────────────────────────── */
+  function Root() {
+    const [status, setStatus] = useState(null); // { enabled, authenticated, sessionTimeoutMinutes }
+    const [expiresAt, setExpiresAt] = useState(getTokenExpiry());
+    const expiryTimerRef = useRef(null);
+
+    const refreshStatus = useCallback(async () => {
+      try {
+        const r = await fetch('/api/auth/status');
+        const s = await r.json();
+        setStatus(s);
+        if (s.enabled && s.authenticated && s.expiresAt) {
+          sessionStorage.setItem(AUTH_EXP_KEY, String(s.expiresAt));
+          setExpiresAt(s.expiresAt);
+        }
+      } catch {
+        setStatus({ enabled: true, authenticated: false, sessionTimeoutMinutes: 5 });
+      }
+    }, []);
+
+    useEffect(() => { refreshStatus(); }, [refreshStatus]);
+
+    // Auto-logout on session expiry
+    useEffect(() => {
+      if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null; }
+      if (!status || !status.enabled || !status.authenticated) return;
+      const exp = expiresAt || getTokenExpiry();
+      if (!exp) return;
+      const ms = exp - Date.now();
+      if (ms <= 0) { handleExpire(); return; }
+      expiryTimerRef.current = setTimeout(handleExpire, ms);
+      return () => { if (expiryTimerRef.current) clearTimeout(expiryTimerRef.current); };
+    }, [status, expiresAt]);
+
+    const handleExpire = useCallback(() => {
+      setToken(null, null);
+      setExpiresAt(0);
+      setStatus(s => s ? { ...s, authenticated: false } : s);
+    }, []);
+
+    useEffect(() => {
+      const onExpired = () => handleExpire();
+      window.addEventListener('bm-auth-expired', onExpired);
+      return () => window.removeEventListener('bm-auth-expired', onExpired);
+    }, [handleExpire]);
+
+    const onLoggedIn = (data) => {
+      setExpiresAt(data.expiresAt);
+      setStatus(s => ({
+        enabled: true,
+        authenticated: true,
+        sessionTimeoutMinutes: data.sessionTimeoutMinutes || (s && s.sessionTimeoutMinutes) || 5,
+      }));
+    };
+
+    const onLogout = useCallback(async () => {
+      try { await fetch('/api/auth/logout', { method:'POST' }); } catch {}
+      handleExpire();
+    }, [handleExpire]);
+
+    if (!status) {
+      return (
+        <div style={{
+          minHeight:'100vh', background:'#0F2A35', color:'#FFF',
+          display:'flex', alignItems:'center', justifyContent:'center', fontSize:14,
+        }}>Loading…</div>
+      );
+    }
+
+    if (status.enabled && !status.authenticated) {
+      return <LoginScreen onLoggedIn={onLoggedIn} />;
+    }
+
+    return (
+      <App
+        authStatus={status}
+        onAuthUpdated={(s) => setStatus(p => ({ ...p, ...s }))}
+        onLogout={onLogout}
+      />
+    );
+  }
+
   /* ─── Main App ──────────────────────────────────────────────── */
-  function App() {
+  function App({ authStatus, onAuthUpdated, onLogout }) {
     const [devices,         setDevices]         = useState({});
     const [recordings,      setRecordings]      = useState({});
     const [screenshots,     setScreenshots]     = useState({});
@@ -1174,7 +1561,10 @@
 
     /* Socket setup */
     useEffect(() => {
-      const socket = io({ transports: ['websocket', 'polling'] });
+      const socket = io({
+        transports: ['websocket', 'polling'],
+        auth: { token: getToken() },
+      });
       socketRef.current = socket;
 
       socket.on('connect',    () => setConnected(true));
@@ -1568,6 +1958,7 @@
             { id:'gallery',     label:'Gallery',     count:visibleTotalGallery, color:'#E67E22' },
             { id:'favorites',   label:'★ Favorites', count:totalFav,            color:'#D69E2E' },
             { id:'app',         label:'App',         count:0,                   color:'#DD6B20' },
+            { id:'settings',    label:'⚙ Settings',  count:0,                   color:'#718096' },
           ].map(t => (
             <button key={t.id} style={tabStyle(tab===t.id, t.color)} onClick={()=>{
               setTab(t.id);
@@ -1764,6 +2155,16 @@
               </Card>
             </div>
           )}
+
+          {/* SETTINGS */}
+          {tab === 'settings' && (
+            <SettingsScreen
+              authCfg={authStatus}
+              onUpdated={onAuthUpdated}
+              onToast={showToast}
+              onLogout={onLogout}
+            />
+          )}
         </div>
 
         {/* ── Floating action bar (Devices tab only) ─────────── */}
@@ -1861,7 +2262,7 @@
     );
   }
 
-  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
 </script>
 
 <script>
