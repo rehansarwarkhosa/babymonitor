@@ -574,20 +574,25 @@
   }
 
   /* ─── Recording row (inline player) ─────────────────────────── */
-  function RecRow({rec, deviceId, onDelete, onStar, starred, inFavorites, note, onSaveNote}) {
+  function RecRow({rec, deviceId, onDelete, onStar, starred, inFavorites, note, onSaveNote, onEnhance, enhancing}) {
     const [open, setOpen] = useState(false);
     const hasNote = !!note;
+    const isNC = rec.filename.startsWith('NC-');
     return (
       <div style={{
         borderBottom:'1px solid #F0F4F5', padding:'11px 10px',
-        background: hasNote ? '#FFFBEA' : 'transparent',
-        borderLeft: hasNote ? '4px solid #ECC94B' : '4px solid transparent',
+        background: isNC ? '#F0FFF4' : (hasNote ? '#FFFBEA' : 'transparent'),
+        borderLeft: isNC ? '4px solid #38A169' : (hasNote ? '4px solid #ECC94B' : '4px solid transparent'),
         marginLeft: -14, marginRight: -14, paddingLeft: 14, paddingRight: 14,
       }}>
         <div style={{display:'flex', alignItems:'center', gap:8}}>
           <div style={{flex:1, minWidth:0}}>
             <div style={{fontSize:13, fontWeight:500, color:'#2D3748',
                          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+              {isNC && <span style={{
+                display:'inline-block', marginRight:6, padding:'1px 6px',
+                fontSize:10, fontWeight:700, color:'#fff', background:'#38A169', borderRadius:4,
+              }}>NC</span>}
               {rec.filename}
             </div>
             <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
@@ -624,6 +629,20 @@
                 }}
               >{starred ? '★' : '☆'}</button>
             )}
+            {!isNC && onEnhance && (
+              <button
+                onClick={()=>onEnhance(deviceId, rec.filename)}
+                disabled={enhancing}
+                title={enhancing ? 'Enhancing…' : 'Enhance: noise-cancel & clarify voice (creates NC- copy)'}
+                style={{
+                  height:32, padding:'0 10px', fontSize:12, borderRadius:8,
+                  border:'1px solid #C6F6D5',
+                  background: enhancing ? '#F0FFF4' : '#FFF',
+                  color:'#38A169', cursor: enhancing ? 'wait' : 'pointer',
+                  fontWeight:600,
+                }}
+              >{enhancing ? '…' : '✨'}</button>
+            )}
             <button
               onClick={()=>onDelete(deviceId, rec.filename)}
               style={{
@@ -643,7 +662,7 @@
   }
 
   /* ─── Device group block (Recordings) ───────────────────────── */
-  function RecGroup({deviceId, group, onDelete, onDeleteAll, onStar, favSet, inFavorites, notesMap, onSaveNote}) {
+  function RecGroup({deviceId, group, onDelete, onDeleteAll, onStar, favSet, inFavorites, notesMap, onSaveNote, onEnhance, enhancingSet}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
@@ -691,6 +710,8 @@
                 inFavorites={inFavorites}
                 note={notesMap ? notesMap[rec.filename] : ''}
                 onSaveNote={onSaveNote}
+                onEnhance={onEnhance}
+                enhancing={enhancingSet ? enhancingSet.has(`${deviceId}/${rec.filename}`) : false}
               />
             ))}
           </div>
@@ -1163,98 +1184,6 @@
     const [rate,        setRate]        = useState(1);
     const [buffered,    setBuffered]    = useState(0);
     const [muted,       setMuted]       = useState(false);
-    const [ncOn,        setNcOn]        = useState(() => {
-      try { return localStorage.getItem('bm_nc_on') === '1'; } catch { return false; }
-    });
-    const [ncLevel,     setNcLevel]     = useState(() => {
-      try { return Number(localStorage.getItem('bm_nc_level')) || 60; } catch { return 60; }
-    });
-    useEffect(() => { try { localStorage.setItem('bm_nc_on', ncOn ? '1' : '0'); } catch {} }, [ncOn]);
-    useEffect(() => { try { localStorage.setItem('bm_nc_level', String(ncLevel)); } catch {} }, [ncLevel]);
-
-    // Web Audio nodes (refs so we can tweak without recreating)
-    const audioCtxRef = useRef(null);
-    const srcNodeRef  = useRef(null);
-    const hpRef       = useRef(null);
-    const notch50Ref  = useRef(null);
-    const notch100Ref = useRef(null);
-    const notch60Ref  = useRef(null);
-    const notch120Ref = useRef(null);
-    const lowShelfRef = useRef(null);
-    const compRef     = useRef(null);
-    const gainRef     = useRef(null);
-    const bypassRef   = useRef(null); // direct path when NC off
-    const destRef     = useRef(null);
-
-    // Build the audio graph once
-    const ensureGraph = () => {
-      const a = audioRef.current; if (!a) return;
-      if (audioCtxRef.current) return;
-      try {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return;
-        const ctx = new Ctx();
-        const src = ctx.createMediaElementSource(a);
-        const hp = ctx.createBiquadFilter();      hp.type = 'highpass'; hp.frequency.value = 120; hp.Q.value = 0.7;
-        const n50 = ctx.createBiquadFilter();     n50.type = 'notch';  n50.frequency.value = 50;  n50.Q.value = 18;
-        const n100 = ctx.createBiquadFilter();    n100.type = 'notch'; n100.frequency.value = 100; n100.Q.value = 18;
-        const n60 = ctx.createBiquadFilter();     n60.type = 'notch';  n60.frequency.value = 60;  n60.Q.value = 18;
-        const n120 = ctx.createBiquadFilter();    n120.type = 'notch'; n120.frequency.value = 120; n120.Q.value = 18;
-        const ls = ctx.createBiquadFilter();      ls.type = 'lowshelf'; ls.frequency.value = 200; ls.gain.value = -6;
-        const comp = ctx.createDynamicsCompressor();
-        comp.threshold.value = -28; comp.knee.value = 24; comp.ratio.value = 3;
-        comp.attack.value = 0.005;  comp.release.value = 0.15;
-        const gain = ctx.createGain(); gain.gain.value = 1.25;
-        const bypass = ctx.createGain(); bypass.gain.value = 1;
-
-        // Filtered path: src → hp → n50 → n100 → n60 → n120 → lowshelf → comp → gain → destination
-        src.connect(hp); hp.connect(n50); n50.connect(n100); n100.connect(n60);
-        n60.connect(n120); n120.connect(ls); ls.connect(comp); comp.connect(gain);
-        gain.connect(ctx.destination);
-        // Bypass path: src → bypass → destination
-        src.connect(bypass); bypass.connect(ctx.destination);
-
-        audioCtxRef.current = ctx;
-        srcNodeRef.current = src;
-        hpRef.current = hp;
-        notch50Ref.current = n50;
-        notch100Ref.current = n100;
-        notch60Ref.current = n60;
-        notch120Ref.current = n120;
-        lowShelfRef.current = ls;
-        compRef.current = comp;
-        gainRef.current = gain;
-        bypassRef.current = bypass;
-      } catch (e) { /* WebAudio not available; audio element plays directly */ }
-    };
-
-    // Apply NC on/off + level to the graph
-    useEffect(() => {
-      ensureGraph();
-      const ctx = audioCtxRef.current;
-      if (!ctx) return;
-      if (ctx.state === 'suspended') ctx.resume().catch(()=>{});
-      const lvl = Math.max(0, Math.min(100, ncLevel)) / 100; // 0..1
-      if (ncOn) {
-        // Filtered on, bypass off
-        bypassRef.current.gain.value = 0;
-        gainRef.current.gain.value = 1 + lvl * 0.6; // makeup gain up to +4.6dB-ish
-        // Scale cutoffs / Q with intensity
-        hpRef.current.frequency.value = 60 + lvl * 260;    // 60Hz..320Hz
-        hpRef.current.Q.value = 0.5 + lvl * 0.6;
-        const nQ = 8 + lvl * 24;                            // 8..32
-        notch50Ref.current.Q.value = nQ;
-        notch100Ref.current.Q.value = nQ;
-        notch60Ref.current.Q.value = nQ;
-        notch120Ref.current.Q.value = nQ;
-        lowShelfRef.current.gain.value = -2 - lvl * 10;     // -2..-12 dB
-        compRef.current.threshold.value = -20 - lvl * 20;   // -20..-40
-        compRef.current.ratio.value = 2 + lvl * 4;          // 2..6
-      } else {
-        bypassRef.current.gain.value = 1;
-        gainRef.current.gain.value = 0;
-      }
-    }, [ncOn, ncLevel]);
 
     useEffect(() => {
       const a = audioRef.current; if (!a) return;
@@ -1420,33 +1349,6 @@
           </select>
         </div>
 
-        {/* Noise cancellation */}
-        <div style={{
-          marginTop:10, padding:'8px 10px',
-          background:'rgba(255,255,255,0.06)', borderRadius:8,
-          display:'flex', alignItems:'center', gap:10, flexWrap:'wrap',
-        }}>
-          <label style={{display:'flex', alignItems:'center', gap:6, cursor:'pointer', fontSize:12, fontWeight:600}}>
-            <input
-              type="checkbox"
-              checked={ncOn}
-              onChange={e => setNcOn(e.target.checked)}
-              style={{width:16, height:16, cursor:'pointer'}}
-            />
-            🎛 Noise cancel
-          </label>
-          <span style={{fontSize:11, color:'#CBD5E0', minWidth:72}}>
-            Strength {ncLevel}%
-          </span>
-          <input
-            type="range" min={0} max={100} step={1}
-            value={ncLevel}
-            onChange={e => setNcLevel(Number(e.target.value))}
-            disabled={!ncOn}
-            style={{flex:1, minWidth:120, cursor: ncOn ? 'pointer' : 'not-allowed', opacity: ncOn ? 1 : 0.5}}
-            aria-label="Noise cancellation strength"
-          />
-        </div>
       </div>
     );
   }
@@ -2136,6 +2038,7 @@
 
       socket.on('devices_update',     setDevices);
       socket.on('new_recording',      fetchRec);
+      socket.on('recording_enhanced', fetchRec);
       socket.on('screenshot_uploaded', d => {
         fetchShot();
         if (d && d.deviceId) setSsStatus(p => { const c={...p}; delete c[d.deviceId]; return c; });
@@ -2462,6 +2365,33 @@
       await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       fetchRec();
     };
+
+    const [enhancingRec, setEnhancingRec] = useState(() => new Set());
+    const enhanceRec = async (deviceId, filename) => {
+      const key = `${deviceId}/${filename}`;
+      if (enhancingRec.has(key)) return;
+      setEnhancingRec(prev => { const n = new Set(prev); n.add(key); return n; });
+      showToast('✨ Enhancing audio — this runs offline, please wait…', 'info');
+      try {
+        const res = await fetch(
+          `/api/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}/enhance`,
+          { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ strength: 70 }) }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showToast(data.error || 'Enhancement failed', 'error');
+        } else if (data.alreadyExists) {
+          showToast('Enhanced copy already exists', 'info');
+        } else {
+          showToast(`✅ Saved as ${data.filename}`, 'info');
+        }
+        fetchRec();
+      } catch {
+        showToast('Network error during enhancement', 'error');
+      } finally {
+        setEnhancingRec(prev => { const n = new Set(prev); n.delete(key); return n; });
+      }
+    };
     const delShot = async (deviceId, filename) => {
       if (!(await deletePolicyAsk('Delete this screenshot?'))) return;
       await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
@@ -2635,6 +2565,8 @@
                     favSet={favSetFor('recordings', id)}
                     notesMap={notes.recordings?.[id]}
                     onSaveNote={saveNote}
+                    onEnhance={enhanceRec}
+                    enhancingSet={enhancingRec}
                   />
                 ))
           )}
@@ -2667,7 +2599,8 @@
                       {favRec[id] && (
                         <RecGroup deviceId={id} group={favRec[id]}
                           onDelete={delFavRec} inFavorites
-                          notesMap={notes.recordings?.[id]} onSaveNote={saveNote} />
+                          notesMap={notes.recordings?.[id]} onSaveNote={saveNote}
+                          onEnhance={enhanceRec} enhancingSet={enhancingRec} />
                       )}
                       {favShot[id] && (
                         <ShotGroup deviceId={id} group={favShot[id]}

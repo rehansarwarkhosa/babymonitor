@@ -6,6 +6,9 @@ const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
+let ffmpegPath = null;
+try { ffmpegPath = require("ffmpeg-static"); } catch (e) { /* optional */ }
 
 const app = express();
 const server = http.createServer(app);
@@ -668,6 +671,102 @@ app.delete("/recordings/:deviceId/:filename", (req, res) => {
   } catch (err) {
     log(`Delete error: ${err.message}`);
     return res.status(500).json({ error: "Failed to delete recording" });
+  }
+});
+
+// Enhance a recording with noise cancellation (offline, FFmpeg afftdn chain)
+// Produces a new sibling file with "NC-" prefix that shows up as an independent item.
+const enhanceJobs = new Map(); // key: `${deviceId}/${filename}` -> { status, pct }
+
+app.post("/api/recordings/:deviceId/:filename/enhance", (req, res) => {
+  try {
+    if (!ffmpegPath) {
+      return res.status(500).json({ error: "ffmpeg not available on server (run npm install)" });
+    }
+    const deviceId = req.params.deviceId;
+    const filename = req.params.filename;
+    if (filename.includes("/") || filename.includes("\\") || filename.startsWith(".")) {
+      return res.status(400).json({ error: "Invalid filename" });
+    }
+    if (filename.startsWith("NC-")) {
+      return res.status(400).json({ error: "Already an enhanced file" });
+    }
+    const deviceDir = path.join(RECORDINGS_DIR, deviceId);
+    const inputPath = path.join(deviceDir, filename);
+    if (!fs.existsSync(inputPath)) {
+      return res.status(404).json({ error: "Recording not found" });
+    }
+    const outFilename = "NC-" + filename;
+    const outputPath = path.join(deviceDir, outFilename);
+    if (fs.existsSync(outputPath)) {
+      return res.json({ success: true, filename: outFilename, alreadyExists: true });
+    }
+
+    const jobKey = `${deviceId}/${filename}`;
+    if (enhanceJobs.has(jobKey)) {
+      return res.status(409).json({ error: "Enhancement already in progress" });
+    }
+
+    // Strength: 0..100 (default 70). Higher = more aggressive denoise, stronger normalization.
+    const strength = Math.max(0, Math.min(100, Number(req.body?.strength) || 70));
+    const nr = 12 + (strength / 100) * 25;          // 12..37
+    const nf = -30 + (strength / 100) * 15;         // -30..-15 dB noise floor
+    const hp = 80 + (strength / 100) * 100;         // 80..180 Hz
+    const lp = 7000;                                // keep intelligibility up to 7k
+    const speechE = (6 + (strength / 100) * 8).toFixed(1); // 6..14 dB expansion
+
+    // Filter chain:
+    //  highpass (kill sub-bass rumble) →
+    //  2× afftdn (FFT spectral denoise, two passes for stubborn constant hum) →
+    //  lowpass (trim high-freq hiss) →
+    //  speechnorm (gentle, slow expansion — loudens soft voice without pumping) →
+    //  acompressor (tame peaks) →
+    //  loudnorm (final EBU R128 normalization)
+    const filterChain =
+      `highpass=f=${hp.toFixed(0)},` +
+      `afftdn=nr=${nr.toFixed(1)}:nf=${nf.toFixed(1)}:nt=w:om=o,` +
+      `afftdn=nr=${nr.toFixed(1)}:nf=${nf.toFixed(1)}:nt=w:om=o,` +
+      `lowpass=f=${lp},` +
+      `speechnorm=e=${speechE}:r=0.0001:l=1,` +
+      `acompressor=threshold=-22dB:ratio=3:attack=5:release=80,` +
+      `loudnorm=I=-16:TP=-1.5:LRA=11`;
+
+    enhanceJobs.set(jobKey, { status: "running", started: Date.now() });
+
+    const args = [
+      "-y",
+      "-i", inputPath,
+      "-af", filterChain,
+      "-ac", "1",
+      "-ar", "44100",
+      "-codec:a", "libmp3lame",
+      "-qscale:a", "3",
+      outputPath,
+    ];
+    const child = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderrBuf = "";
+    child.stderr.on("data", (d) => { stderrBuf += d.toString(); if (stderrBuf.length > 20000) stderrBuf = stderrBuf.slice(-10000); });
+    child.on("error", (err) => {
+      enhanceJobs.delete(jobKey);
+      log(`Enhance spawn error: ${err.message}`);
+      try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch {}
+      if (!res.headersSent) res.status(500).json({ error: "FFmpeg failed to start" });
+    });
+    child.on("close", (code) => {
+      enhanceJobs.delete(jobKey);
+      if (code !== 0) {
+        log(`Enhance failed (code ${code}) for ${jobKey}: ${stderrBuf.slice(-500)}`);
+        try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch {}
+        if (!res.headersSent) return res.status(500).json({ error: "Enhancement failed" });
+        return;
+      }
+      log(`Enhance ok: ${jobKey} → ${outFilename}`);
+      io.emit("recording_enhanced", { deviceId, original: filename, filename: outFilename });
+      if (!res.headersSent) return res.json({ success: true, filename: outFilename });
+    });
+  } catch (err) {
+    log(`Enhance error: ${err.message}`);
+    return res.status(500).json({ error: "Failed to enhance recording" });
   }
 });
 
