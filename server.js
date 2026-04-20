@@ -786,15 +786,36 @@ app.post("/api/recordings/:deviceId/:filename/enhance", async (req, res) => {
     if (!fs.existsSync(inputPath)) {
       return res.status(404).json({ error: "Recording not found" });
     }
-    // Output is always .mp3 (libmp3lame) regardless of input extension.
+    // Engine selection: 'rnnoise' (AI) | 'afftdn' (FFmpeg classical) | 'auto' (RNN → fallback).
+    const engineReq = String(req.body?.engine || "auto").toLowerCase();
+    if (!["rnnoise", "afftdn", "auto"].includes(engineReq)) {
+      return res.status(400).json({ error: "engine must be rnnoise, afftdn, or auto" });
+    }
+
+    // Each engine writes to its own filename so both can coexist for A/B listening.
+    //   RNNoise AI → NC-AI-<name>.mp3
+    //   FFmpeg     → NC-<name>.mp3
     const baseNoExt = filename.replace(/\.[^.]+$/, "");
-    const outFilename = "NC-" + baseNoExt + ".mp3";
+    const prefix = (engineReq === "rnnoise") ? "NC-AI-" : "NC-"; // auto resolves below
+    let outPrefix = prefix;
+    let modelPath = null;
+    if (engineReq !== "afftdn") {
+      modelPath = await ensureRnnoiseModel();
+      if (engineReq === "rnnoise" && !modelPath) {
+        return res.status(503).json({
+          error: "RNNoise model unavailable — check server internet access or use FFmpeg engine",
+        });
+      }
+      if (modelPath) outPrefix = "NC-AI-";
+      else if (engineReq === "auto") outPrefix = "NC-";
+    }
+    const outFilename = outPrefix + baseNoExt + ".mp3";
     const outputPath = path.join(deviceDir, outFilename);
     if (fs.existsSync(outputPath)) {
       return res.json({ success: true, filename: outFilename, alreadyExists: true });
     }
 
-    const jobKey = `${deviceId}/${filename}`;
+    const jobKey = `${deviceId}/${filename}/${outPrefix}`;
     if (enhanceJobs.has(jobKey)) {
       return res.status(409).json({ error: "Enhancement already in progress" });
     }
@@ -808,9 +829,8 @@ app.post("/api/recordings/:deviceId/:filename/enhance", async (req, res) => {
     if (residualNf < -80)     residualNf = -80;
     const speechE = (8 + (strength / 100) * 8).toFixed(1);       // 8..16 dB expansion
 
-    // Try to use RNNoise (neural denoiser) as the primary stage.
-    const modelPath = await ensureRnnoiseModel();
-    const usingRnnoise = !!modelPath;
+    // Engine selected above. For 'afftdn' we intentionally skip the neural path.
+    const usingRnnoise = engineReq !== "afftdn" && !!modelPath;
 
     // Professional chain:
     //   highpass       → strip DC / sub-bass rumble
@@ -856,7 +876,7 @@ app.post("/api/recordings/:deviceId/:filename/enhance", async (req, res) => {
     }
 
     enhanceJobs.set(jobKey, { status: "running", started: Date.now(), engine: usingRnnoise ? "rnnoise" : "afftdn" });
-    log(`Enhance start: ${jobKey} using ${usingRnnoise ? "RNNoise (arnndn)" : "afftdn fallback"}`);
+    log(`Enhance start: engine=${usingRnnoise ? "RNNoise(arnndn)" : "afftdn"}  in=${inputPath}  out=${outputPath}`);
 
     // Output: 48 kHz mono MP3 @ VBR quality 2 (≈190 kbps), strip any video.
     // Staying at 48 kHz avoids a second resample after the neural stage.
@@ -889,7 +909,17 @@ app.post("/api/recordings/:deviceId/:filename/enhance", async (req, res) => {
         if (!res.headersSent) return res.status(500).json({ error: "Enhancement failed" });
         return;
       }
-      log(`Enhance ok: ${jobKey} → ${outFilename}`);
+      // Sanity check: output exists and isn't trivially tiny (means filter chain produced actual audio).
+      try {
+        const sz = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
+        if (sz < 1024) {
+          log(`Enhance produced empty output (${sz} bytes) — discarding`);
+          try { fs.unlinkSync(outputPath); } catch {}
+          if (!res.headersSent) return res.status(500).json({ error: "Enhancement produced empty file" });
+          return;
+        }
+        log(`Enhance ok: ${jobKey} → ${outFilename} (${sz} bytes, engine=${usingRnnoise ? "rnnoise" : "afftdn"})`);
+      } catch (e) { log(`Enhance size-check error: ${e.message}`); }
       // If the source was favorited, auto-favorite the enhanced copy so it shows up in Favorites tab.
       let favorited = false;
       try {

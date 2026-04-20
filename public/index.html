@@ -574,10 +574,13 @@
   }
 
   /* ─── Recording row (inline player) ─────────────────────────── */
-  function RecRow({rec, deviceId, onDelete, onStar, starred, inFavorites, note, onSaveNote, onEnhance, enhancing}) {
+  function RecRow({rec, deviceId, onDelete, onStar, starred, inFavorites, note, onSaveNote, onEnhance, enhancingEngines}) {
     const [open, setOpen] = useState(false);
     const hasNote = !!note;
     const isNC = rec.filename.startsWith('NC-');
+    const isAI = rec.filename.startsWith('NC-AI-');
+    const busyAi    = enhancingEngines ? enhancingEngines.has(`${deviceId}/${rec.filename}/rnnoise`) : false;
+    const busyClassic = enhancingEngines ? enhancingEngines.has(`${deviceId}/${rec.filename}/afftdn`)  : false;
     return (
       <div style={{
         borderBottom:'1px solid #F0F4F5', padding:'11px 10px',
@@ -591,8 +594,9 @@
                          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
               {isNC && <span style={{
                 display:'inline-block', marginRight:6, padding:'1px 6px',
-                fontSize:10, fontWeight:700, color:'#fff', background:'#38A169', borderRadius:4,
-              }}>NC</span>}
+                fontSize:10, fontWeight:700, color:'#fff',
+                background: isAI ? '#7B68AE' : '#38A169', borderRadius:4,
+              }}>{isAI ? 'AI' : 'NC'}</span>}
               {rec.filename}
             </div>
             <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
@@ -630,18 +634,32 @@
               >{starred ? '★' : '☆'}</button>
             )}
             {!isNC && onEnhance && (
-              <button
-                onClick={()=>onEnhance(deviceId, rec.filename)}
-                disabled={enhancing}
-                title={enhancing ? 'Enhancing…' : 'Enhance: noise-cancel & clarify voice (creates NC- copy)'}
-                style={{
-                  height:32, padding:'0 10px', fontSize:12, borderRadius:8,
-                  border:'1px solid #C6F6D5',
-                  background: enhancing ? '#F0FFF4' : '#FFF',
-                  color:'#38A169', cursor: enhancing ? 'wait' : 'pointer',
-                  fontWeight:600,
-                }}
-              >{enhancing ? '…' : '✨'}</button>
+              <>
+                <button
+                  onClick={()=>onEnhance(deviceId, rec.filename, 'rnnoise')}
+                  disabled={busyAi}
+                  title={busyAi ? 'Enhancing with AI…' : 'Enhance with RNNoise AI (creates NC-AI- copy)'}
+                  style={{
+                    height:32, padding:'0 10px', fontSize:12, borderRadius:8,
+                    border:'1px solid #D6BCFA',
+                    background: busyAi ? '#FAF5FF' : '#FFF',
+                    color:'#7B68AE', cursor: busyAi ? 'wait' : 'pointer',
+                    fontWeight:700,
+                  }}
+                >{busyAi ? '…' : '✨AI'}</button>
+                <button
+                  onClick={()=>onEnhance(deviceId, rec.filename, 'afftdn')}
+                  disabled={busyClassic}
+                  title={busyClassic ? 'Enhancing with FFmpeg…' : 'Enhance with FFmpeg afftdn (creates NC- copy)'}
+                  style={{
+                    height:32, padding:'0 10px', fontSize:12, borderRadius:8,
+                    border:'1px solid #C6F6D5',
+                    background: busyClassic ? '#F0FFF4' : '#FFF',
+                    color:'#38A169', cursor: busyClassic ? 'wait' : 'pointer',
+                    fontWeight:700,
+                  }}
+                >{busyClassic ? '…' : '🧹FF'}</button>
+              </>
             )}
             <button
               onClick={()=>onDelete(deviceId, rec.filename)}
@@ -662,7 +680,7 @@
   }
 
   /* ─── Device group block (Recordings) ───────────────────────── */
-  function RecGroup({deviceId, group, onDelete, onDeleteAll, onStar, favSet, inFavorites, notesMap, onSaveNote, onEnhance, enhancingSet}) {
+  function RecGroup({deviceId, group, onDelete, onDeleteAll, onStar, favSet, inFavorites, notesMap, onSaveNote, onEnhance, enhancingEngines}) {
     const [open, setOpen] = useState(true);
     const color = devColor(deviceId);
     return (
@@ -711,7 +729,7 @@
                 note={notesMap ? notesMap[rec.filename] : ''}
                 onSaveNote={onSaveNote}
                 onEnhance={onEnhance}
-                enhancing={enhancingSet ? enhancingSet.has(`${deviceId}/${rec.filename}`) : false}
+                enhancingEngines={enhancingEngines}
               />
             ))}
           </div>
@@ -2370,25 +2388,31 @@
     };
 
     const [enhancingRec, setEnhancingRec] = useState(() => new Set());
-    const enhanceRec = async (deviceId, filename) => {
-      const key = `${deviceId}/${filename}`;
+    const enhanceRec = async (deviceId, filename, engine) => {
+      const eng = (engine === 'rnnoise' || engine === 'afftdn') ? engine : 'auto';
+      const key = `${deviceId}/${filename}/${eng}`;
       if (enhancingRec.has(key)) return;
       setEnhancingRec(prev => { const n = new Set(prev); n.add(key); return n; });
-      showToast('✨ Enhancing audio — this runs offline, please wait…', 'info');
+      const label = eng === 'rnnoise' ? '✨ RNNoise AI' : '🧹 FFmpeg';
+      showToast(`${label} — processing ${filename}…`, 'info');
       try {
         const res = await fetch(
           `/api/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}/enhance`,
-          { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ strength: 70 }) }
+          {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ strength: 75, engine: eng }),
+          }
         );
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           showToast(data.error || 'Enhancement failed', 'error');
         } else if (data.alreadyExists) {
-          showToast('Enhanced copy already exists', 'info');
+          showToast(`Enhanced copy already exists: ${data.filename}`, 'info');
         } else {
-          const eng = data.engine === 'rnnoise' ? ' (RNNoise AI)' : '';
+          const tag = data.engine === 'rnnoise' ? ' (RNNoise AI)' : ' (FFmpeg)';
           const fav = data.favorited ? ' — added to Favorites' : '';
-          showToast(`✅ Saved as ${data.filename}${eng}${fav}`, 'info');
+          showToast(`✅ Saved as ${data.filename}${tag}${fav}`, 'info');
         }
         fetchRec();
         if (data.favorited) fetchFavorites();
@@ -2572,7 +2596,7 @@
                     notesMap={notes.recordings?.[id]}
                     onSaveNote={saveNote}
                     onEnhance={enhanceRec}
-                    enhancingSet={enhancingRec}
+                    enhancingEngines={enhancingRec}
                   />
                 ))
           )}
