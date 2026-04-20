@@ -7,8 +7,81 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const https = require("https");
 let ffmpegPath = null;
 try { ffmpegPath = require("ffmpeg-static"); } catch (e) { /* optional */ }
+
+// ─── RNNoise model (professional ML-based voice denoiser, used by OBS/Krisp/Discord) ───
+// Uses the `arnndn` FFmpeg filter with the GregorR "somnolent-hogwash" speech model —
+// a recurrent neural network trained on thousands of hours of noisy speech. Dramatically
+// better than classical spectral subtraction (afftdn) for constant fan/hum + far voice.
+const MODELS_DIR = path.join(__dirname, "models");
+const RNNOISE_MODEL_PATH = path.join(MODELS_DIR, "sh.rnnn");
+const RNNOISE_MODEL_URL =
+  "https://raw.githubusercontent.com/GregorR/rnnoise-models/master/somnolent-hogwash-2018-09-01/sh.rnnn";
+
+function downloadFile(url, destPath, redirectsLeft = 5) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        if (redirectsLeft <= 0) return reject(new Error("Too many redirects"));
+        res.resume();
+        return resolve(downloadFile(res.headers.location, destPath, redirectsLeft - 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+      const tmp = destPath + ".part";
+      const ws = fs.createWriteStream(tmp);
+      res.pipe(ws);
+      ws.on("finish", () => ws.close(() => {
+        try { fs.renameSync(tmp, destPath); resolve(); }
+        catch (e) { reject(e); }
+      }));
+      ws.on("error", (e) => { try { fs.unlinkSync(tmp); } catch {} reject(e); });
+    });
+    req.on("error", reject);
+    req.setTimeout(30000, () => req.destroy(new Error("timeout")));
+  });
+}
+
+function validateRnnoiseModel(p) {
+  // GregorR .rnnn files are plain-text float grids, ~85 KB, starting with digits/sign/space.
+  try {
+    const st = fs.statSync(p);
+    if (st.size < 50000 || st.size > 500000) return false;
+    const head = fs.readFileSync(p, { encoding: "utf8", flag: "r" }).slice(0, 200);
+    // Must be ASCII floats separated by whitespace (digits, '-', '.', 'e', space, newline)
+    return /^[\s\-0-9.eE]+$/.test(head) && head.trim().length > 20;
+  } catch { return false; }
+}
+
+let _modelFetchPromise = null;
+async function ensureRnnoiseModel() {
+  try {
+    if (validateRnnoiseModel(RNNOISE_MODEL_PATH)) return RNNOISE_MODEL_PATH;
+    // Nuke corrupt/partial file if present
+    try { if (fs.existsSync(RNNOISE_MODEL_PATH)) fs.unlinkSync(RNNOISE_MODEL_PATH); } catch {}
+    if (!fs.existsSync(MODELS_DIR)) fs.mkdirSync(MODELS_DIR, { recursive: true });
+    if (!_modelFetchPromise) {
+      _modelFetchPromise = (async () => {
+        log(`Downloading RNNoise model (sh.rnnn) → ${RNNOISE_MODEL_PATH}`);
+        await downloadFile(RNNOISE_MODEL_URL, RNNOISE_MODEL_PATH);
+        if (!validateRnnoiseModel(RNNOISE_MODEL_PATH)) {
+          try { fs.unlinkSync(RNNOISE_MODEL_PATH); } catch {}
+          throw new Error("Downloaded model failed validation");
+        }
+        log(`RNNoise model ready (${fs.statSync(RNNOISE_MODEL_PATH).size} bytes)`);
+      })().catch((e) => { _modelFetchPromise = null; throw e; });
+    }
+    await _modelFetchPromise;
+    return RNNOISE_MODEL_PATH;
+  } catch (e) {
+    log(`RNNoise model unavailable (${e.message}) — will fall back to afftdn`);
+    return null;
+  }
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -674,11 +747,22 @@ app.delete("/recordings/:deviceId/:filename", (req, res) => {
   }
 });
 
-// Enhance a recording with noise cancellation (offline, FFmpeg afftdn chain)
+// Kick off model download at startup so first-user request is instant
+ensureRnnoiseModel().catch(() => {});
+
+app.get("/api/enhance/info", (req, res) => {
+  res.json({
+    available: !!ffmpegPath,
+    engine: fs.existsSync(RNNOISE_MODEL_PATH) ? "rnnoise" : "afftdn",
+    modelReady: fs.existsSync(RNNOISE_MODEL_PATH),
+  });
+});
+
+// Enhance a recording with noise cancellation (offline, FFmpeg RNNoise/afftdn chain)
 // Produces a new sibling file with "NC-" prefix that shows up as an independent item.
 const enhanceJobs = new Map(); // key: `${deviceId}/${filename}` -> { status, pct }
 
-app.post("/api/recordings/:deviceId/:filename/enhance", (req, res) => {
+app.post("/api/recordings/:deviceId/:filename/enhance", async (req, res) => {
   try {
     if (!ffmpegPath) {
       return res.status(500).json({ error: "ffmpeg not available on server (run npm install)" });
@@ -709,43 +793,77 @@ app.post("/api/recordings/:deviceId/:filename/enhance", (req, res) => {
       return res.status(409).json({ error: "Enhancement already in progress" });
     }
 
-    // Strength: 0..100 (default 70). Higher = more aggressive denoise, stronger normalization.
-    const strength = Math.max(0, Math.min(100, Number(req.body?.strength) || 70));
-    const nr = 12 + (strength / 100) * 25;          // 12..37
-    // afftdn nf range is [-80, -20]. Stronger denoise = lower (more negative) nf.
-    let nf = -25 - (strength / 100) * 30;            // -25..-55 dB noise floor
-    if (nf > -20.001) nf = -20.001;
-    if (nf < -80)     nf = -80;
-    const hp = 80 + (strength / 100) * 100;         // 80..180 Hz
-    const lp = 7000;                                // keep intelligibility up to 7k
-    const speechE = (6 + (strength / 100) * 8).toFixed(1); // 6..14 dB expansion
+    // Strength: 0..100 (default 75). Shapes normalization / residual-cleanup intensity.
+    const strength = Math.max(0, Math.min(100, Number(req.body?.strength) || 75));
+    const hp = 70 + (strength / 100) * 80;                       // 70..150 Hz — sub-bass rumble cut
+    const residualNr = 6 + (strength / 100) * 10;                // 6..16 — light residual spectral cleanup after RNN
+    let residualNf = -30 - (strength / 100) * 20;                // -30..-50 dB floor
+    if (residualNf > -20.001) residualNf = -20.001;
+    if (residualNf < -80)     residualNf = -80;
+    const speechE = (8 + (strength / 100) * 8).toFixed(1);       // 8..16 dB expansion
 
-    // Filter chain:
-    //  highpass (kill sub-bass rumble) →
-    //  2× afftdn (FFT spectral denoise, two passes for stubborn constant hum) →
-    //  lowpass (trim high-freq hiss) →
-    //  speechnorm (gentle, slow expansion — loudens soft voice without pumping) →
-    //  acompressor (tame peaks) →
-    //  loudnorm (final EBU R128 normalization)
-    const filterChain =
-      `highpass=f=${hp.toFixed(0)},` +
-      `afftdn=nr=${nr.toFixed(1)}:nf=${nf.toFixed(1)}:nt=w:om=o,` +
-      `afftdn=nr=${nr.toFixed(1)}:nf=${nf.toFixed(1)}:nt=w:om=o,` +
-      `lowpass=f=${lp},` +
-      `speechnorm=e=${speechE}:r=0.0001:l=1,` +
-      `acompressor=threshold=-22dB:ratio=3:attack=5:release=80,` +
-      `loudnorm=I=-16:TP=-1.5:LRA=11`;
+    // Try to use RNNoise (neural denoiser) as the primary stage.
+    const modelPath = await ensureRnnoiseModel();
+    const usingRnnoise = !!modelPath;
 
-    enhanceJobs.set(jobKey, { status: "running", started: Date.now() });
+    // Professional chain:
+    //   highpass       → strip DC / sub-bass rumble
+    //   aresample 48k  → arnndn requires 48 kHz mono
+    //   arnndn=m=...   → RNNoise ML voice/noise separation (the magic)
+    //   afftdn (light) → mop up any residual broadband hiss the RNN left
+    //   deesser-ish via lowpass (optional, keep 7.5k for intelligibility)
+    //   speechnorm     → slow expander — lifts quiet voice without pumping
+    //   acompressor    → tame peaks
+    //   loudnorm       → EBU R128 final normalization (-16 LUFS, podcast-level)
+    let filterChain;
+    if (usingRnnoise) {
+      // Escape Windows drive-letter colons AND backslashes for the filtergraph parser.
+      // Convert C:\foo\bar.rnnn → C\:/foo/bar.rnnn
+      const mEsc = modelPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+      // mix: RNNoise wet/dry ratio. Below 0.5 lets too much noise through; above 0.95
+      // can sound slightly robotic. Map strength 0..100 → mix 0.55..1.00.
+      const mix = (0.55 + (strength / 100) * 0.45).toFixed(2);
+      filterChain =
+        `highpass=f=${hp.toFixed(0)},` +
+        `aresample=48000:resampler=soxr:precision=28,` +
+        `aformat=sample_fmts=flt:channel_layouts=mono,` +
+        `arnndn=m=${mEsc}:mix=${mix},` +
+        `afftdn=nr=${residualNr.toFixed(1)}:nf=${residualNf.toFixed(1)}:nt=w:om=o,` +
+        `lowpass=f=7500,` +
+        `speechnorm=e=${speechE}:r=0.0001:l=1,` +
+        `acompressor=threshold=-22dB:ratio=3:attack=5:release=80,` +
+        `loudnorm=I=-16:TP=-1.5:LRA=11`;
+    } else {
+      // Fallback: aggressive classical spectral subtraction (2 passes)
+      const nr = 12 + (strength / 100) * 25;
+      let nf = -25 - (strength / 100) * 30;
+      if (nf > -20.001) nf = -20.001;
+      if (nf < -80)     nf = -80;
+      filterChain =
+        `highpass=f=${hp.toFixed(0)},` +
+        `afftdn=nr=${nr.toFixed(1)}:nf=${nf.toFixed(1)}:nt=w:om=o,` +
+        `afftdn=nr=${nr.toFixed(1)}:nf=${nf.toFixed(1)}:nt=w:om=o,` +
+        `lowpass=f=7500,` +
+        `speechnorm=e=${speechE}:r=0.0001:l=1,` +
+        `acompressor=threshold=-22dB:ratio=3:attack=5:release=80,` +
+        `loudnorm=I=-16:TP=-1.5:LRA=11`;
+    }
 
+    enhanceJobs.set(jobKey, { status: "running", started: Date.now(), engine: usingRnnoise ? "rnnoise" : "afftdn" });
+    log(`Enhance start: ${jobKey} using ${usingRnnoise ? "RNNoise (arnndn)" : "afftdn fallback"}`);
+
+    // Output: 48 kHz mono MP3 @ VBR quality 2 (≈190 kbps), strip any video.
+    // Staying at 48 kHz avoids a second resample after the neural stage.
     const args = [
       "-y",
+      "-hide_banner", "-nostats",
       "-i", inputPath,
+      "-vn",
       "-af", filterChain,
       "-ac", "1",
-      "-ar", "44100",
+      "-ar", usingRnnoise ? "48000" : "44100",
       "-codec:a", "libmp3lame",
-      "-qscale:a", "3",
+      "-qscale:a", "2",
       outputPath,
     ];
     const child = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
@@ -781,8 +899,9 @@ app.post("/api/recordings/:deviceId/:filename/enhance", (req, res) => {
           }
         }
       } catch (e) { log(`Auto-fav after enhance failed: ${e.message}`); }
-      io.emit("recording_enhanced", { deviceId, original: filename, filename: outFilename, favorited });
-      if (!res.headersSent) return res.json({ success: true, filename: outFilename, favorited });
+      const engine = usingRnnoise ? "rnnoise" : "afftdn";
+      io.emit("recording_enhanced", { deviceId, original: filename, filename: outFilename, favorited, engine });
+      if (!res.headersSent) return res.json({ success: true, filename: outFilename, favorited, engine });
     });
   } catch (err) {
     log(`Enhance error: ${err.message}`);

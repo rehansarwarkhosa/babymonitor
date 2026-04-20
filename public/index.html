@@ -2385,10 +2385,10 @@
           showToast(data.error || 'Enhancement failed', 'error');
         } else if (data.alreadyExists) {
           showToast('Enhanced copy already exists', 'info');
-        } else if (data.favorited) {
-          showToast(`✅ Saved as ${data.filename} — added to Favorites`, 'info');
         } else {
-          showToast(`✅ Saved as ${data.filename}`, 'info');
+          const eng = data.engine === 'rnnoise' ? ' (RNNoise AI)' : '';
+          const fav = data.favorited ? ' — added to Favorites' : '';
+          showToast(`✅ Saved as ${data.filename}${eng}${fav}`, 'info');
         }
         fetchRec();
         if (data.favorited) fetchFavorites();

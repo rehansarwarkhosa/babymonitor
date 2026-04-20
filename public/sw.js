@@ -1,4 +1,4 @@
-const CACHE_NAME = 'baby-monitor-v11';
+const CACHE_NAME = 'baby-monitor-v13';
 const STATIC_ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (event) => {
