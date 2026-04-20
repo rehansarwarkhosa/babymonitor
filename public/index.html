@@ -200,17 +200,30 @@
   /* ─── Password Confirmation Modal ───────────────────────────── */
   function PasswordModal({ prompt }) {
     const [val, setVal] = useState('');
-    const [err, setErr] = useState(false);
+    const [err, setErr] = useState('');
+    const [busy, setBusy] = useState(false);
     const ref = useRef(null);
     useEffect(() => {
       if (prompt && ref.current) setTimeout(() => ref.current.focus(), 50);
+      if (!prompt) { setVal(''); setErr(''); setBusy(false); }
     }, [prompt]);
     if (!prompt) return null;
-    const submit = () => {
-      if (val === '0000') { setVal(''); setErr(false); prompt.onOk(); }
-      else { setErr(true); setVal(''); ref.current && ref.current.focus(); }
+    const submit = async () => {
+      if (busy || val.length < 4) return;
+      setBusy(true); setErr('');
+      try {
+        const r = await fetch('/api/auth/verify', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ password: val }),
+        });
+        if (r.ok) { const pw = val; setVal(''); setBusy(false); prompt.onOk(pw); return; }
+        setErr('Incorrect password'); setVal(''); setBusy(false);
+        ref.current && ref.current.focus();
+      } catch {
+        setErr('Network error'); setBusy(false);
+      }
     };
-    const cancel = () => { setVal(''); setErr(false); prompt.onCancel(); };
+    const cancel = () => { setVal(''); setErr(''); setBusy(false); prompt.onCancel(); };
     return (
       <div onClick={cancel} style={{
         position:'fixed', inset:0, zIndex:800, background:'rgba(0,0,0,0.65)',
@@ -221,35 +234,39 @@
           boxShadow:'0 10px 30px rgba(0,0,0,0.3)',
         }}>
           <div style={{fontSize:15, fontWeight:700, color:'#2D3748', marginBottom:6}}>
-            🔒 Confirm delete
+            {prompt.title || '🔒 Confirm'}
           </div>
           <div style={{fontSize:13, color:'#4A5568', marginBottom:14}}>
             {prompt.message}
           </div>
           <input
             ref={ref}
-            type="password" inputMode="numeric" pattern="\d*" maxLength={4}
-            value={val} autoFocus
-            onChange={e=>{ setVal(e.target.value.replace(/\D/g,'').slice(0,4)); setErr(false); }}
+            type="password" inputMode="numeric" pattern="\d*" maxLength={12}
+            autoComplete="one-time-code"
+            data-lpignore="true" data-1p-ignore="true"
+            value={val} autoFocus disabled={busy}
+            onChange={e=>{ setVal(e.target.value.replace(/\D/g,'').slice(0,12)); setErr(''); }}
             onKeyDown={e=>{ if (e.key==='Enter') submit(); if (e.key==='Escape') cancel(); }}
             placeholder="• • • •"
             style={{
               width:'100%', height:52, fontSize:26, textAlign:'center', letterSpacing:'0.5em',
               padding:'0 16px', borderRadius:10,
               border:`1.5px solid ${err?'#E53E3E':'#E2E8F0'}`,
-              marginBottom:6, background:'#F7FAFC', boxSizing:'border-box',
+              marginBottom:6, background:'#F7FAFC', boxSizing:'border-box', color:'#2D3748',
             }}
           />
-          {err && <div style={{fontSize:12, color:'#E53E3E', marginBottom:6}}>Incorrect password</div>}
+          {err && <div style={{fontSize:12, color:'#E53E3E', marginBottom:6}}>{err}</div>}
           <div style={{display:'flex', gap:10, marginTop:12}}>
-            <button onClick={cancel} style={{
+            <button onClick={cancel} disabled={busy} style={{
               flex:1, height:44, borderRadius:10, border:'1.5px solid #E2E8F0',
               background:'#FFF', color:'#4A5568', fontWeight:600, fontSize:14, cursor:'pointer',
-            }}>No</button>
-            <button onClick={submit} style={{
+            }}>Cancel</button>
+            <button onClick={submit} disabled={busy || val.length<4} style={{
               flex:1, height:44, borderRadius:10, border:'none',
-              background:'#E53E3E', color:'#FFF', fontWeight:700, fontSize:14, cursor:'pointer',
-            }}>Yes</button>
+              background: (busy || val.length<4) ? '#A0AEC0' : (prompt.confirmColor || '#E53E3E'),
+              color:'#FFF', fontWeight:700, fontSize:14,
+              cursor:(busy || val.length<4) ? 'not-allowed' : 'pointer',
+            }}>{busy ? '…' : (prompt.confirmLabel || 'Confirm')}</button>
           </div>
         </div>
       </div>
@@ -1146,6 +1163,98 @@
     const [rate,        setRate]        = useState(1);
     const [buffered,    setBuffered]    = useState(0);
     const [muted,       setMuted]       = useState(false);
+    const [ncOn,        setNcOn]        = useState(() => {
+      try { return localStorage.getItem('bm_nc_on') === '1'; } catch { return false; }
+    });
+    const [ncLevel,     setNcLevel]     = useState(() => {
+      try { return Number(localStorage.getItem('bm_nc_level')) || 60; } catch { return 60; }
+    });
+    useEffect(() => { try { localStorage.setItem('bm_nc_on', ncOn ? '1' : '0'); } catch {} }, [ncOn]);
+    useEffect(() => { try { localStorage.setItem('bm_nc_level', String(ncLevel)); } catch {} }, [ncLevel]);
+
+    // Web Audio nodes (refs so we can tweak without recreating)
+    const audioCtxRef = useRef(null);
+    const srcNodeRef  = useRef(null);
+    const hpRef       = useRef(null);
+    const notch50Ref  = useRef(null);
+    const notch100Ref = useRef(null);
+    const notch60Ref  = useRef(null);
+    const notch120Ref = useRef(null);
+    const lowShelfRef = useRef(null);
+    const compRef     = useRef(null);
+    const gainRef     = useRef(null);
+    const bypassRef   = useRef(null); // direct path when NC off
+    const destRef     = useRef(null);
+
+    // Build the audio graph once
+    const ensureGraph = () => {
+      const a = audioRef.current; if (!a) return;
+      if (audioCtxRef.current) return;
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        const ctx = new Ctx();
+        const src = ctx.createMediaElementSource(a);
+        const hp = ctx.createBiquadFilter();      hp.type = 'highpass'; hp.frequency.value = 120; hp.Q.value = 0.7;
+        const n50 = ctx.createBiquadFilter();     n50.type = 'notch';  n50.frequency.value = 50;  n50.Q.value = 18;
+        const n100 = ctx.createBiquadFilter();    n100.type = 'notch'; n100.frequency.value = 100; n100.Q.value = 18;
+        const n60 = ctx.createBiquadFilter();     n60.type = 'notch';  n60.frequency.value = 60;  n60.Q.value = 18;
+        const n120 = ctx.createBiquadFilter();    n120.type = 'notch'; n120.frequency.value = 120; n120.Q.value = 18;
+        const ls = ctx.createBiquadFilter();      ls.type = 'lowshelf'; ls.frequency.value = 200; ls.gain.value = -6;
+        const comp = ctx.createDynamicsCompressor();
+        comp.threshold.value = -28; comp.knee.value = 24; comp.ratio.value = 3;
+        comp.attack.value = 0.005;  comp.release.value = 0.15;
+        const gain = ctx.createGain(); gain.gain.value = 1.25;
+        const bypass = ctx.createGain(); bypass.gain.value = 1;
+
+        // Filtered path: src → hp → n50 → n100 → n60 → n120 → lowshelf → comp → gain → destination
+        src.connect(hp); hp.connect(n50); n50.connect(n100); n100.connect(n60);
+        n60.connect(n120); n120.connect(ls); ls.connect(comp); comp.connect(gain);
+        gain.connect(ctx.destination);
+        // Bypass path: src → bypass → destination
+        src.connect(bypass); bypass.connect(ctx.destination);
+
+        audioCtxRef.current = ctx;
+        srcNodeRef.current = src;
+        hpRef.current = hp;
+        notch50Ref.current = n50;
+        notch100Ref.current = n100;
+        notch60Ref.current = n60;
+        notch120Ref.current = n120;
+        lowShelfRef.current = ls;
+        compRef.current = comp;
+        gainRef.current = gain;
+        bypassRef.current = bypass;
+      } catch (e) { /* WebAudio not available; audio element plays directly */ }
+    };
+
+    // Apply NC on/off + level to the graph
+    useEffect(() => {
+      ensureGraph();
+      const ctx = audioCtxRef.current;
+      if (!ctx) return;
+      if (ctx.state === 'suspended') ctx.resume().catch(()=>{});
+      const lvl = Math.max(0, Math.min(100, ncLevel)) / 100; // 0..1
+      if (ncOn) {
+        // Filtered on, bypass off
+        bypassRef.current.gain.value = 0;
+        gainRef.current.gain.value = 1 + lvl * 0.6; // makeup gain up to +4.6dB-ish
+        // Scale cutoffs / Q with intensity
+        hpRef.current.frequency.value = 60 + lvl * 260;    // 60Hz..320Hz
+        hpRef.current.Q.value = 0.5 + lvl * 0.6;
+        const nQ = 8 + lvl * 24;                            // 8..32
+        notch50Ref.current.Q.value = nQ;
+        notch100Ref.current.Q.value = nQ;
+        notch60Ref.current.Q.value = nQ;
+        notch120Ref.current.Q.value = nQ;
+        lowShelfRef.current.gain.value = -2 - lvl * 10;     // -2..-12 dB
+        compRef.current.threshold.value = -20 - lvl * 20;   // -20..-40
+        compRef.current.ratio.value = 2 + lvl * 4;          // 2..6
+      } else {
+        bypassRef.current.gain.value = 1;
+        gainRef.current.gain.value = 0;
+      }
+    }, [ncOn, ncLevel]);
 
     useEffect(() => {
       const a = audioRef.current; if (!a) return;
@@ -1309,6 +1418,34 @@
               <option key={r} value={r} style={{color:'#000'}}>{r}×</option>
             ))}
           </select>
+        </div>
+
+        {/* Noise cancellation */}
+        <div style={{
+          marginTop:10, padding:'8px 10px',
+          background:'rgba(255,255,255,0.06)', borderRadius:8,
+          display:'flex', alignItems:'center', gap:10, flexWrap:'wrap',
+        }}>
+          <label style={{display:'flex', alignItems:'center', gap:6, cursor:'pointer', fontSize:12, fontWeight:600}}>
+            <input
+              type="checkbox"
+              checked={ncOn}
+              onChange={e => setNcOn(e.target.checked)}
+              style={{width:16, height:16, cursor:'pointer'}}
+            />
+            🎛 Noise cancel
+          </label>
+          <span style={{fontSize:11, color:'#CBD5E0', minWidth:72}}>
+            Strength {ncLevel}%
+          </span>
+          <input
+            type="range" min={0} max={100} step={1}
+            value={ncLevel}
+            onChange={e => setNcLevel(Number(e.target.value))}
+            disabled={!ncOn}
+            style={{flex:1, minWidth:120, cursor: ncOn ? 'pointer' : 'not-allowed', opacity: ncOn ? 1 : 0.5}}
+            aria-label="Noise cancellation strength"
+          />
         </div>
       </div>
     );
@@ -1539,11 +1676,16 @@
 
     const [timeoutMin, setTimeoutMin] = useState(authCfg.sessionTimeoutMinutes);
     const [enabled, setEnabled]       = useState(authCfg.enabled);
+    const [reqDel, setReqDel]         = useState(authCfg.requireDeletePassword !== false);
+    const [lockDel, setLockDel]       = useState(!!authCfg.lockDelete);
     const [cfgBusy, setCfgBusy]       = useState(false);
+    const [delBusy, setDelBusy]       = useState(false);
 
     useEffect(() => {
       setTimeoutMin(authCfg.sessionTimeoutMinutes);
       setEnabled(authCfg.enabled);
+      setReqDel(authCfg.requireDeletePassword !== false);
+      setLockDel(!!authCfg.lockDelete);
     }, [authCfg]);
 
     const changePassword = async () => {
@@ -1578,6 +1720,21 @@
         onUpdated(data);
       } catch { onToast('Network error', 'error'); }
       setCfgBusy(false);
+    };
+
+    const saveDel = async (next) => {
+      setDelBusy(true);
+      try {
+        const res = await fetch('/api/auth/settings', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(next),
+        });
+        const data = await res.json();
+        if (!res.ok) { onToast(data.error || 'Failed', 'error'); setDelBusy(false); return; }
+        onToast('Delete settings updated', 'info');
+        onUpdated(data);
+      } catch { onToast('Network error', 'error'); }
+      setDelBusy(false);
     };
 
     const numInput = (value, onChange, placeholder, extra={}) => (
@@ -1664,6 +1821,45 @@
         </div>
 
         <div style={{
+          background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
+          boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+        }}>
+          <div style={{fontSize:16, fontWeight:700, color:'#2D3748', marginBottom:14}}>
+            🗑 Delete Protection
+          </div>
+          <label style={{display:'flex', alignItems:'flex-start', gap:10, marginBottom:12, cursor: delBusy?'wait':'pointer'}}>
+            <input
+              type="checkbox"
+              checked={reqDel}
+              disabled={delBusy}
+              onChange={e => { const v = e.target.checked; setReqDel(v); saveDel({ requireDeletePassword: v }); }}
+              style={{width:18, height:18, cursor: delBusy?'wait':'pointer', marginTop:2}}
+            />
+            <div>
+              <div style={{fontSize:14, color:'#2D3748', fontWeight:600}}>Require password for delete</div>
+              <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
+                Prompt for the portal password before deleting any recording, screenshot, gallery item, or bulk delete.
+              </div>
+            </div>
+          </label>
+          <label style={{display:'flex', alignItems:'flex-start', gap:10, cursor: delBusy?'wait':'pointer'}}>
+            <input
+              type="checkbox"
+              checked={lockDel}
+              disabled={delBusy}
+              onChange={e => { const v = e.target.checked; setLockDel(v); saveDel({ lockDelete: v }); }}
+              style={{width:18, height:18, cursor: delBusy?'wait':'pointer', marginTop:2}}
+            />
+            <div>
+              <div style={{fontSize:14, color:'#2D3748', fontWeight:600}}>Lock delete (disable everywhere)</div>
+              <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
+                Hides/disables all delete buttons across the portal. Turn this on if you never want to accidentally delete anything.
+              </div>
+            </div>
+          </label>
+        </div>
+
+        <div style={{
           background:'#FFF', borderRadius:14, padding:20,
           boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
         }}>
@@ -1736,6 +1932,13 @@
       handleExpire();
     }, [handleExpire]);
 
+    const onExtended = useCallback((data) => {
+      if (!data || !data.expiresAt) return;
+      sessionStorage.setItem(AUTH_EXP_KEY, String(data.expiresAt));
+      setExpiresAt(data.expiresAt);
+      setStatus(p => p ? { ...p, extended: true, expiresAt: data.expiresAt } : p);
+    }, []);
+
     if (!status) {
       return (
         <div style={{
@@ -1754,12 +1957,13 @@
         authStatus={status}
         onAuthUpdated={(s) => setStatus(p => ({ ...p, ...s }))}
         onLogout={onLogout}
+        onExtended={onExtended}
       />
     );
   }
 
   /* ─── Main App ──────────────────────────────────────────────── */
-  function App({ authStatus, onAuthUpdated, onLogout }) {
+  function App({ authStatus, onAuthUpdated, onLogout, onExtended }) {
     const [devices,         setDevices]         = useState({});
     const [recordings,      setRecordings]      = useState({});
     const [screenshots,     setScreenshots]     = useState({});
@@ -1770,7 +1974,10 @@
     const [ssStatus,        setSsStatus]        = useState({});
     const [timers,          setTimers]          = useState({});
     const [duration,        setDuration]        = useState(60);
-    const [tab,             setTab]             = useState('devices');
+    const [tab,             setTab]             = useState(() => {
+      try { return localStorage.getItem('bm_tab') || 'devices'; } catch { return 'devices'; }
+    });
+    useEffect(() => { try { localStorage.setItem('bm_tab', tab); } catch {} }, [tab]);
     const [lightbox,        setLightbox]        = useState(null);
     const [toast,           setToast]           = useState(null);
     const [connected,       setConnected]       = useState(false);
@@ -1829,13 +2036,36 @@
     };
     const noteFor = (kind, deviceId, filename) => notes[kind]?.[deviceId]?.[filename] || '';
     const [passPrompt, setPassPrompt] = useState(null);
-    const askPassword = (message) => new Promise(resolve => {
+    // Resolves to the verified password string on success, or null on cancel.
+    // Truthy-check (`if (await askPassword(...))`) still works for existing callers.
+    const askPassword = (opts) => new Promise(resolve => {
+      const o = typeof opts === 'string' ? { message: opts } : (opts || {});
       setPassPrompt({
-        message,
-        onOk:     () => { setPassPrompt(null); resolve(true); },
-        onCancel: () => { setPassPrompt(null); resolve(false); },
+        title: o.title,
+        message: o.message,
+        confirmLabel: o.confirmLabel,
+        confirmColor: o.confirmColor,
+        onOk:     (pw) => { setPassPrompt(null); resolve(pw || true); },
+        onCancel: ()   => { setPassPrompt(null); resolve(null); },
       });
     });
+
+    // Respect delete policy from auth settings.
+    const deletePolicyAsk = async (msg) => {
+      if (authStatus?.lockDelete) {
+        showToast('Delete is locked in Settings', 'warn');
+        return false;
+      }
+      if (authStatus?.requireDeletePassword) {
+        return await askPassword({
+          title: '🔒 Confirm delete',
+          message: msg,
+          confirmLabel: 'Delete',
+          confirmColor: '#E53E3E',
+        });
+      }
+      return true;
+    };
 
     const socketRef   = useRef(null);
     const timerRefs   = useRef({});
@@ -2111,9 +2341,9 @@
       const hasFavs  = favRecs.size + favShots.size + favGal.size > 0;
 
       const msg = hasFavs
-        ? 'Remove this offline device? Favorites will be preserved. Enter password 0000 to confirm.'
-        : 'Remove this offline device and ALL its data? Enter password 0000 to confirm.';
-      if (!(await askPassword(msg))) return;
+        ? 'Remove this offline device? Favorites will be preserved.'
+        : 'Remove this offline device and ALL its data?';
+      if (!(await deletePolicyAsk(msg))) return;
 
       const recs  = recordings[deviceId]?.recordings   || [];
       const shots = screenshots[deviceId]?.screenshots || [];
@@ -2144,7 +2374,7 @@
     };
 
     const delGallery = async (deviceId, filename) => {
-      if (!confirm('Delete this gallery image?')) return;
+      if (!(await deletePolicyAsk('Delete this gallery image?'))) return;
       await fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       fetchGallery();
     };
@@ -2154,7 +2384,7 @@
       const favs = new Set(favorites.recordings?.[deviceId] || []);
       const list = (recordings[deviceId]?.recordings || []).filter(r => !favs.has(r.filename));
       if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
-      if (!confirm(`Delete ${list.length} recording(s)? Favorites will be kept.`)) return;
+      if (!(await deletePolicyAsk(`Delete ${list.length} recording(s)? Favorites will be kept.`))) return;
       await Promise.all(list.map(r =>
         fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(r.filename)}`, {method:'DELETE'})
       ));
@@ -2165,7 +2395,7 @@
       const favs = new Set(favorites.screenshots?.[deviceId] || []);
       const list = (screenshots[deviceId]?.screenshots || []).filter(s => !favs.has(s.filename));
       if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
-      if (!confirm(`Delete ${list.length} screenshot(s)? Favorites will be kept.`)) return;
+      if (!(await deletePolicyAsk(`Delete ${list.length} screenshot(s)? Favorites will be kept.`))) return;
       await Promise.all(list.map(s =>
         fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(s.filename)}`, {method:'DELETE'})
       ));
@@ -2176,7 +2406,7 @@
       const favs = new Set(favorites.gallery?.[deviceId] || []);
       const list = (gallery[deviceId]?.images || []).filter(i => !favs.has(i.filename));
       if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
-      if (!confirm(`Delete ${list.length} image(s)? Favorites will be kept.`)) return;
+      if (!(await deletePolicyAsk(`Delete ${list.length} image(s)? Favorites will be kept.`))) return;
       await Promise.all(list.map(i =>
         fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(i.filename)}`, {method:'DELETE'})
       ));
@@ -2184,21 +2414,25 @@
       showToast(`Deleted ${list.length} image(s)`, 'info');
     };
 
-    // Favorite deletion — password protected
+    // Favorite deletion — always password protected (even if setting is off),
+    // to keep starred items extra-safe.
     const delFavRec = async (deviceId, filename) => {
-      if (!(await askPassword('Delete this favorite recording? Enter password 0000 to confirm.'))) return;
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+      if (!(await askPassword({ title:'🔒 Confirm delete', message:'Delete this favorite recording?', confirmLabel:'Delete', confirmColor:'#E53E3E' }))) return;
       await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       removeFav('recordings', deviceId, filename);
       fetchRec();
     };
     const delFavShot = async (deviceId, filename) => {
-      if (!(await askPassword('Delete this favorite screenshot? Enter password 0000 to confirm.'))) return;
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+      if (!(await askPassword({ title:'🔒 Confirm delete', message:'Delete this favorite screenshot?', confirmLabel:'Delete', confirmColor:'#E53E3E' }))) return;
       await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       removeFav('screenshots', deviceId, filename);
       fetchShot();
     };
     const delFavGallery = async (deviceId, filename) => {
-      if (!(await askPassword('Delete this favorite image? Enter password 0000 to confirm.'))) return;
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+      if (!(await askPassword({ title:'🔒 Confirm delete', message:'Delete this favorite image?', confirmLabel:'Delete', confirmColor:'#E53E3E' }))) return;
       await fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       removeFav('gallery', deviceId, filename);
       fetchGallery();
@@ -2224,12 +2458,12 @@
     };
 
     const delRec  = async (deviceId, filename) => {
-      if (!confirm('Delete this recording?')) return;
+      if (!(await deletePolicyAsk('Delete this recording?'))) return;
       await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       fetchRec();
     };
     const delShot = async (deviceId, filename) => {
-      if (!confirm('Delete this screenshot?')) return;
+      if (!(await deletePolicyAsk('Delete this screenshot?'))) return;
       await fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       fetchShot();
     };
@@ -2263,7 +2497,54 @@
                 : 'Connecting…'}
             </div>
           </div>
-          <div style={{display:'flex', alignItems:'center', gap:10}}>
+          <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', justifyContent:'flex-end'}}>
+            {authStatus?.enabled && (
+              <div
+                onClick={async () => {
+                  if (authStatus.extended) {
+                    showToast('Session already extended for 2 hours', 'info');
+                    return;
+                  }
+                  const pw = await askPassword({
+                    title:'⏱ Extend session to 2 hours',
+                    message:'Keep this device signed in for 2 hours (ignores the normal session timeout). Enter password to confirm.',
+                    confirmLabel:'Extend 2h',
+                    confirmColor:'#38A169',
+                  });
+                  if (!pw || typeof pw !== 'string') return;
+                  try {
+                    const r = await fetch('/api/auth/extend', {
+                      method:'POST', headers:{'Content-Type':'application/json'},
+                      body: JSON.stringify({ password: pw, hours: 2 }),
+                    });
+                    const data = await r.json();
+                    if (!r.ok) { showToast(data.error || 'Extend failed', 'error'); return; }
+                    onExtended && onExtended(data);
+                    showToast('Session extended for 2 hours', 'info');
+                  } catch {
+                    showToast('Network error', 'error');
+                  }
+                }}
+                title={authStatus.extended ? 'Session extended for 2 hours' : 'Extend session for 2 hours'}
+                style={{
+                  display:'flex', alignItems:'center', gap:6, cursor:'pointer',
+                  fontSize:11, fontWeight:600, color:'#FFF',
+                  background: authStatus.extended ? '#38A169' : 'rgba(255,255,255,0.08)',
+                  padding:'5px 10px', borderRadius:8,
+                  border:`1px solid ${authStatus.extended ? '#68D391' : 'rgba(255,255,255,0.25)'}`,
+                  whiteSpace:'nowrap', userSelect:'none',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!authStatus.extended}
+                  readOnly
+                  onChange={()=>{}}
+                  style={{width:14, height:14, cursor:'pointer', accentColor:'#38A169', pointerEvents:'none'}}
+                />
+                <span>⏱ 2h</span>
+              </div>
+            )}
             {apkInfo?.available && (
               <a href="/api/apk/download" style={{
                 fontSize:12, fontWeight:600, color:'#38A169', background:'#F0FFF4',

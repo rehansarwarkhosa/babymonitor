@@ -209,12 +209,16 @@ function loadAuth() {
     if (typeof a.enabled !== "boolean") a.enabled = true;
     if (!a.sessionTimeoutMinutes || a.sessionTimeoutMinutes < 1)
       a.sessionTimeoutMinutes = 5;
+    if (typeof a.requireDeletePassword !== "boolean") a.requireDeletePassword = true;
+    if (typeof a.lockDelete !== "boolean") a.lockDelete = false;
     return a;
   } catch {
     const def = {
       enabled: true,
       passwordHash: hashPassword("2412"),
       sessionTimeoutMinutes: 5,
+      requireDeletePassword: true,
+      lockDelete: false,
     };
     try { fs.writeFileSync(AUTH_FILE, JSON.stringify(def, null, 2)); } catch {}
     return def;
@@ -273,12 +277,42 @@ app.get("/api/auth/status", (req, res) => {
   const a = loadAuth();
   const token = getReqToken(req);
   const valid = isValidToken(token);
+  const s = valid ? sessions.get(token) : null;
   res.json({
     enabled: a.enabled,
     sessionTimeoutMinutes: a.sessionTimeoutMinutes,
+    requireDeletePassword: a.requireDeletePassword,
+    lockDelete: a.lockDelete,
     authenticated: !a.enabled || valid,
-    expiresAt: valid ? sessions.get(token).expiresAt : null,
+    expiresAt: s ? s.expiresAt : null,
+    extended: s ? !!s.extended : false,
   });
+});
+
+// Verify password without issuing a new session (used for in-app confirmations).
+app.post("/api/auth/verify", (req, res) => {
+  const { password } = req.body || {};
+  const a = loadAuth();
+  if (hashPassword(password || "") !== a.passwordHash) {
+    return res.status(401).json({ error: "Incorrect password" });
+  }
+  res.json({ success: true });
+});
+
+// Extend the current session to an absolute window (default 2 hours).
+app.post("/api/auth/extend", (req, res) => {
+  const { password, hours } = req.body || {};
+  const a = loadAuth();
+  if (hashPassword(password || "") !== a.passwordHash) {
+    return res.status(401).json({ error: "Incorrect password" });
+  }
+  const token = getReqToken(req);
+  const s = token ? sessions.get(token) : null;
+  if (!s) return res.status(401).json({ error: "No active session" });
+  const h = Math.min(24, Math.max(1, Number(hours) || 2));
+  s.expiresAt = Date.now() + h * 3600000;
+  s.extended = true;
+  res.json({ expiresAt: s.expiresAt, extended: true, hours: h });
 });
 
 app.post("/api/auth/login", (req, res) => {
@@ -318,7 +352,7 @@ app.post("/api/auth/change-password", requireAuth, (req, res) => {
 });
 
 app.post("/api/auth/settings", requireAuth, (req, res) => {
-  const { sessionTimeoutMinutes, enabled } = req.body || {};
+  const { sessionTimeoutMinutes, enabled, requireDeletePassword, lockDelete } = req.body || {};
   const a = loadAuth();
   if (sessionTimeoutMinutes !== undefined) {
     const n = Math.floor(Number(sessionTimeoutMinutes));
@@ -328,10 +362,14 @@ app.post("/api/auth/settings", requireAuth, (req, res) => {
     a.sessionTimeoutMinutes = n;
   }
   if (typeof enabled === "boolean") a.enabled = enabled;
+  if (typeof requireDeletePassword === "boolean") a.requireDeletePassword = requireDeletePassword;
+  if (typeof lockDelete === "boolean") a.lockDelete = lockDelete;
   saveAuth(a);
   res.json({
     enabled: a.enabled,
     sessionTimeoutMinutes: a.sessionTimeoutMinutes,
+    requireDeletePassword: a.requireDeletePassword,
+    lockDelete: a.lockDelete,
   });
 });
 
