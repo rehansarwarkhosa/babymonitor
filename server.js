@@ -874,9 +874,9 @@ app.post("/api/recordings/:deviceId/:filename/enhance", async (req, res) => {
     }
     const outFilename = outPrefix + baseNoExt + ".mp3";
     const outputPath = path.join(deviceDir, outFilename);
-    if (fs.existsSync(outputPath)) {
-      return res.json({ success: true, filename: outFilename, alreadyExists: true });
-    }
+    // Allow regeneration: if the enhanced output already exists (e.g. the user
+    // deleted it from the UI but the file lingered, or they want to redo it),
+    // just overwrite it. ffmpeg is invoked with -y below.
 
     const jobKey = `${deviceId}/${filename}/${outPrefix}`;
     if (enhanceJobs.has(jobKey)) {
