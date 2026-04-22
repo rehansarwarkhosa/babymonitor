@@ -2487,12 +2487,34 @@
     const rename = (id, n) =>
       socketRef.current.emit('update_device_name', { targetDeviceId:id, newName:n });
 
-    const recordAll = () => onlineDev.filter(d=>!d.isRecording).forEach(d=>record(d.deviceId));
-    const stopAll   = () => {
+    const recordAll = async () => {
+      const targets = onlineDev.filter(d=>!d.isRecording);
+      if (targets.length === 0) return;
+      if (!(await askPassword({
+        title:'🔒 Confirm Record All',
+        message:`Start recording on ${targets.length} device(s)?`,
+        confirmLabel:'Record', confirmColor:'#4A90A4',
+      }))) return;
+      targets.forEach(d=>record(d.deviceId));
+    };
+    const stopAll = async () => {
+      if (!(await askPassword({
+        title:'🔒 Confirm Stop All',
+        message:'Stop recording on ALL devices?',
+        confirmLabel:'Stop', confirmColor:'#E53E3E',
+      }))) return;
       socketRef.current.emit('stop_recording', { targetDeviceId:'all' });
       Object.keys(timerRefs.current).forEach(stopTimer);
     };
-    const shotAll   = () => onlineDev.forEach(d=>shot(d.deviceId));
+    const shotAll = async () => {
+      if (onlineDev.length === 0) return;
+      if (!(await askPassword({
+        title:'🔒 Confirm Screenshot All',
+        message:`Take screenshots on ${onlineDev.length} device(s)?`,
+        confirmLabel:'Capture', confirmColor:'#7B68AE',
+      }))) return;
+      onlineDev.forEach(d=>shot(d.deviceId));
+    };
 
     const setAudioSource = (deviceId, source) => {
       socketRef.current.emit('set_audio_source', { targetDeviceId: deviceId, source });
