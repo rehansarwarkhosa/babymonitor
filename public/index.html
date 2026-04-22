@@ -154,17 +154,24 @@
     {label:'10 min', value:600},{label:'15 min', value:900},
   ];
 
-  const CUSTOM_DUR_KEY = 'bm_custom_durations';
-  const loadCustomDurations = () => {
+  const fetchCustomDurations = async () => {
     try {
-      const raw = localStorage.getItem(CUSTOM_DUR_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr.filter(n => Number.isFinite(n) && n > 0) : [];
+      const r = await fetch('/api/settings');
+      if (!r.ok) return [];
+      const s = await r.json();
+      return Array.isArray(s.customDurations)
+        ? s.customDurations.filter(n => Number.isFinite(n) && n > 0)
+        : [];
     } catch { return []; }
   };
-  const saveCustomDurations = (arr) => {
-    try { localStorage.setItem(CUSTOM_DUR_KEY, JSON.stringify(arr)); } catch {}
+  const persistCustomDurations = async (arr) => {
+    try {
+      await fetch('/api/settings', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ customDurations: arr }),
+      });
+    } catch {}
   };
   const formatStorageBytes = (bytes) => {
     const b = Number(bytes) || 0;
@@ -615,7 +622,7 @@
   }
 
   /* ─── Recording row (inline player) ─────────────────────────── */
-  function RecRow({rec, deviceId, onDelete, onStar, starred, inFavorites, note, onSaveNote, onEnhance, enhancingEngines}) {
+  function RecRow({rec, deviceId, onDelete, onStar, starred, inFavorites, note, onSaveNote, onEnhance, enhancingEngines, isChild}) {
     const [open, setOpen] = useState(false);
     const hasNote = !!note;
     const isNC = rec.filename.startsWith('NC-');
@@ -624,11 +631,27 @@
     const busyClassic = enhancingEngines ? enhancingEngines.has(`${deviceId}/${rec.filename}/afftdn`)  : false;
     return (
       <div style={{
-        borderBottom:'1px solid #F0F4F5', padding:'11px 10px',
-        background: isNC ? '#F0FFF4' : (hasNote ? '#FFFBEA' : 'transparent'),
-        borderLeft: isNC ? '4px solid #38A169' : (hasNote ? '4px solid #ECC94B' : '4px solid transparent'),
-        marginLeft: -14, marginRight: -14, paddingLeft: 14, paddingRight: 14,
+        borderBottom:'1px solid #E2E8F0',
+        borderTop: isChild ? 'none' : '1px solid #F0F4F5',
+        padding:'13px 10px',
+        marginBottom: isChild ? 0 : 6,
+        background: isNC ? '#F0FFF4' : (hasNote ? '#FFFBEA' : '#FFF'),
+        borderLeft: isChild
+          ? `4px solid ${isAI ? '#7B68AE' : '#38A169'}`
+          : (hasNote ? '4px solid #ECC94B' : '4px solid transparent'),
+        marginLeft: isChild ? 14 : -14,
+        marginRight: -14,
+        paddingLeft: isChild ? 18 : 14,
+        paddingRight: 14,
+        position: 'relative',
       }}>
+        {isChild && (
+          <div style={{
+            position:'absolute', left:0, top:0, bottom:'50%', width:14,
+            borderLeft:'2px solid #CBD5E0', borderBottom:'2px solid #CBD5E0',
+            borderBottomLeftRadius:8, pointerEvents:'none',
+          }} />
+        )}
         <div style={{display:'flex', alignItems:'center', gap:8}}>
           <div style={{flex:1, minWidth:0}}>
             <div style={{fontSize:13, fontWeight:500, color:'#2D3748',
@@ -761,18 +784,49 @@
                 }}>🗑 Delete All Recordings</button>
               </div>
             )}
-            {group.recordings.map(rec => (
-              <RecRow
-                key={rec.filename} rec={rec} deviceId={deviceId}
-                onDelete={onDelete} onStar={onStar}
-                starred={favSet ? favSet.has(rec.filename) : false}
-                inFavorites={inFavorites}
-                note={notesMap ? notesMap[rec.filename] : ''}
-                onSaveNote={onSaveNote}
-                onEnhance={onEnhance}
-                enhancingEngines={enhancingEngines}
-              />
-            ))}
+            {(() => {
+              const baseOf = (fn) => {
+                let b = fn;
+                if (b.startsWith('NC-AI-')) b = b.slice(6);
+                else if (b.startsWith('NC-')) b = b.slice(3);
+                return b.replace(/\.[^.]+$/, '');
+              };
+              const parents = [];
+              const childMap = {};
+              group.recordings.forEach(r => {
+                if (r.filename.startsWith('NC-')) {
+                  const key = baseOf(r.filename);
+                  (childMap[key] = childMap[key] || []).push(r);
+                } else {
+                  parents.push(r);
+                }
+              });
+              const parentKeys = new Set(parents.map(r => r.filename.replace(/\.[^.]+$/, '')));
+              const ordered = [];
+              parents.forEach(p => {
+                ordered.push({ rec: p, child: false });
+                const k = p.filename.replace(/\.[^.]+$/, '');
+                (childMap[k] || []).forEach(c => ordered.push({ rec: c, child: true }));
+              });
+              Object.keys(childMap).forEach(k => {
+                if (!parentKeys.has(k)) {
+                  childMap[k].forEach(c => ordered.push({ rec: c, child: false }));
+                }
+              });
+              return ordered.map(({rec, child}) => (
+                <RecRow
+                  key={rec.filename} rec={rec} deviceId={deviceId}
+                  isChild={child}
+                  onDelete={onDelete} onStar={onStar}
+                  starred={favSet ? favSet.has(rec.filename) : false}
+                  inFavorites={inFavorites}
+                  note={notesMap ? notesMap[rec.filename] : ''}
+                  onSaveNote={onSaveNote}
+                  onEnhance={onEnhance}
+                  enhancingEngines={enhancingEngines}
+                />
+              ));
+            })()}
           </div>
         )}
       </div>
@@ -2035,7 +2089,10 @@
     const [ssStatus,        setSsStatus]        = useState({});
     const [timers,          setTimers]          = useState({});
     const [duration,        setDuration]        = useState(60);
-    const [customDurations, setCustomDurations] = useState(loadCustomDurations);
+    const [customDurations, setCustomDurations] = useState([]);
+    useEffect(() => {
+      fetchCustomDurations().then(setCustomDurations);
+    }, []);
     const mergedDurations = React.useMemo(() => {
       const seen = new Set(DURATIONS.map(d => d.value));
       const extras = customDurations
@@ -2208,6 +2265,9 @@
       socket.on('disconnect', () => { setConnected(false); showToast('Connection lost — reconnecting…', 'warn'); });
 
       socket.on('devices_update',     setDevices);
+      socket.on('settings_update', (s) => {
+        if (s && Array.isArray(s.customDurations)) setCustomDurations(s.customDurations);
+      });
       socket.on('new_recording',      fetchRec);
       socket.on('recording_enhanced', (d) => {
         fetchRec();
@@ -2941,7 +3001,7 @@
               onToast={showToast}
               onLogout={onLogout}
               customDurations={customDurations}
-              onCustomDurationsChange={(next)=>{ setCustomDurations(next); saveCustomDurations(next); }}
+              onCustomDurationsChange={(next)=>{ setCustomDurations(next); persistCustomDurations(next); }}
             />
           )}
         </div>
@@ -2951,8 +3011,9 @@
           <div style={{
             position:'fixed', bottom:0, left:0, right:0, zIndex:180,
             background:'#FFF', borderTop:'1px solid #E2E8F0',
-            padding:`10px 12px calc(10px + var(--safe-bottom))`,
-            display:'flex', gap:8, alignItems:'center',
+            padding:`10px 10px calc(10px + var(--safe-bottom))`,
+            display:'flex', gap:6, alignItems:'center', flexWrap:'wrap',
+            boxSizing:'border-box',
             boxShadow:'0 -2px 14px rgba(0,0,0,0.09)',
           }}>
             {/* Duration picker (dropdown + custom minutes input) */}
@@ -2987,10 +3048,10 @@
 
             {/* Record all */}
             <Btn
-              full
               color="#4A90A4"
               onClick={recordAll}
               disabled={onlineDev.every(d=>d.isRecording)}
+              style={{flex:'1 1 140px', minWidth:0, padding:'0 12px'}}
             >
               ◉ Record All ({onlineDev.length})
             </Btn>

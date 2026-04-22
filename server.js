@@ -116,6 +116,7 @@ const APK_DIR = path.join(__dirname, "apk");
 const FAVORITES_FILE = path.join(__dirname, "favorites.json");
 const AUTH_FILE = path.join(__dirname, "auth.json");
 const NOTES_FILE = path.join(__dirname, "notes.json");
+const SETTINGS_FILE = path.join(__dirname, "settings.json");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -453,6 +454,38 @@ app.post("/api/auth/settings", requireAuth, (req, res) => {
     requireDeletePassword: a.requireDeletePassword,
     lockDelete: a.lockDelete,
   });
+});
+
+// ─── Shared app settings (customDurations, etc.) ────────────
+function loadSettings() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+    if (!Array.isArray(s.customDurations)) s.customDurations = [];
+    s.customDurations = s.customDurations
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return s;
+  } catch {
+    return { customDurations: [] };
+  }
+}
+function saveSettings(s) {
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2)); } catch {}
+}
+app.get("/api/settings", (req, res) => {
+  res.json(loadSettings());
+});
+app.post("/api/settings", (req, res) => {
+  const s = loadSettings();
+  const { customDurations } = req.body || {};
+  if (Array.isArray(customDurations)) {
+    s.customDurations = Array.from(new Set(
+      customDurations.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    )).sort((a, b) => a - b);
+  }
+  saveSettings(s);
+  io.emit("settings_update", s);
+  res.json(s);
 });
 
 // NOTE: Auth is intentionally client-side only (login gate + session timeout in the UI).
