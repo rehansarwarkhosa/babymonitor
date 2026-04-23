@@ -134,6 +134,23 @@
 
   const fmtTimer = (s) => `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
 
+  // Parse recording time from filename. Android writes:
+  //   <deviceId>_YYYYMMDD_HHmmss[_chunkN].m4a
+  // Enhanced copies keep the original basename, prefixed with NC- / NC-AI-.
+  // Returns an ISO string, or null when the pattern is absent (legacy / renamed files).
+  const parseRecordedAt = (filename) => {
+    if (!filename) return null;
+    let base = filename.replace(/\.[^.]+$/, '');
+    if (base.startsWith('NC-AI-')) base = base.slice(6);
+    else if (base.startsWith('NC-')) base = base.slice(3);
+    const m = base.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+    if (!m) return null;
+    const [, Y, Mo, D, h, mi, s] = m;
+    const dt = new Date(Number(Y), Number(Mo) - 1, Number(D), Number(h), Number(mi), Number(s));
+    if (isNaN(dt.getTime())) return null;
+    return dt.toISOString();
+  };
+
   const timeAgo = (s) => {
     if (!s) return '';
     const d = Math.floor((Date.now() - new Date(s)) / 1000);
@@ -627,6 +644,7 @@
     const hasNote = !!note;
     const isNC = rec.filename.startsWith('NC-');
     const isAI = rec.filename.startsWith('NC-AI-');
+    const recordedAt = parseRecordedAt(rec.filename);
     const busyAi    = enhancingEngines ? enhancingEngines.has(`${deviceId}/${rec.filename}/rnnoise`) : false;
     const busyClassic = enhancingEngines ? enhancingEngines.has(`${deviceId}/${rec.filename}/afftdn`)  : false;
     return (
@@ -658,8 +676,26 @@
               }}>{isAI ? 'AI' : 'NC'}</span>}
               {rec.filename}
             </div>
-            <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
-              {fmtDate(rec.created)} · {fmtSize(rec.size)}
+            <div style={{display:'flex', flexWrap:'wrap', gap:'4px 8px', marginTop:4, fontSize:11}}>
+              {recordedAt && (
+                <span title={`Recorded ${new Date(recordedAt).toLocaleString()}`}
+                      style={{
+                        display:'inline-flex', alignItems:'center', gap:4,
+                        padding:'2px 7px', borderRadius:999,
+                        background:'#EBF8FF', color:'#2B6CB0', fontWeight:600,
+                      }}>
+                  🎙 Rec: {fmtDate(recordedAt)} · {timeAgo(recordedAt)}
+                </span>
+              )}
+              <span title={`Uploaded ${new Date(rec.created).toLocaleString()}`}
+                    style={{
+                      display:'inline-flex', alignItems:'center', gap:4,
+                      padding:'2px 7px', borderRadius:999,
+                      background:'#F7FAFC', color:'#718096', fontWeight:500,
+                    }}>
+                ⬆ Up: {fmtDate(rec.created)}
+              </span>
+              <span style={{color:'#A0AEC0', alignSelf:'center'}}>{fmtSize(rec.size)}</span>
             </div>
           </div>
           <div style={{display:'flex', gap:5, flexShrink:0}}>
@@ -867,6 +903,7 @@
   /* ─── Screenshot thumbnail ───────────────────────────────────── */
   function ShotThumb({shot, deviceId, onDelete, onLightbox, onStar, starred, inFavorites, note, onSaveNote}) {
     const hasNote = !!note;
+    const capturedAt = parseRecordedAt(shot.filename);
     return (
       <div style={{
         background: hasNote ? '#FFFBEA' : '#FFF', borderRadius:12, overflow:'hidden',
@@ -880,9 +917,19 @@
           onClick={()=>onLightbox(shot.url)}
           style={{width:'100%', height:130, objectFit:'cover', display:'block', cursor:'zoom-in'}}
         />
-        <div style={{padding:'7px 9px 9px'}}>
-          <div style={{fontSize:11, color:'#718096'}}>{fmtDate(shot.created)}</div>
-          <div style={{fontSize:11, color:'#A0AEC0', marginBottom:6}}>{fmtSize(shot.size)}</div>
+        <div style={{padding:'8px 10px 10px'}}>
+          {capturedAt && (
+            <div title={`Captured ${new Date(capturedAt).toLocaleString()}`}
+                 style={{
+                   display:'inline-block', fontSize:10, fontWeight:600,
+                   padding:'1px 6px', marginBottom:3, borderRadius:999,
+                   background:'#EBF8FF', color:'#2B6CB0',
+                 }}>📸 {fmtDate(capturedAt)}</div>
+          )}
+          <div style={{fontSize:10, color:'#A0AEC0'}}>
+            ⬆ Up: {fmtDate(shot.created)} · {fmtSize(shot.size)}
+          </div>
+          <div style={{height:6}} />
           <div style={{display:'flex', gap:4}}>
             <a href={shot.url} download={shot.filename} style={{
               flex:1, display:'flex', alignItems:'center', justifyContent:'center',
