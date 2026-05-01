@@ -541,22 +541,45 @@
     const subline = [dev.model, dev.manufacturer, dev.androidVersion ? 'Android '+dev.androidVersion : '']
       .filter(Boolean).join(' · ');
 
+    // Compact icon-only action button — used on narrow phones so 5 buttons fit one row.
+    const aBtn = (props) => {
+      const {color:c, onClick, disabled, title, children, primary} = props;
+      return (
+        <button
+          onClick={onClick}
+          disabled={disabled}
+          title={title}
+          style={{
+            flex:'1 1 0', minWidth:0, height:38, padding:'0 8px',
+            fontSize:13, fontWeight:700, borderRadius:9,
+            display:'flex', alignItems:'center', justifyContent:'center', gap:4,
+            border: primary ? 'none' : `1.5px solid ${disabled?'#E2E8F0':c}`,
+            background: primary ? (disabled?'#E2E8F0':c) : '#FFF',
+            color: primary ? (disabled?'#A0AEC0':'#FFF') : (disabled?'#CBD5E0':c),
+            cursor: disabled?'not-allowed':'pointer',
+            whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
+            boxShadow: primary ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+          }}
+        >{children}</button>
+      );
+    };
+
     return (
-      <Card accent={color} style={{marginBottom:12}}>
-        {/* ── Top row: name + status ── */}
-        <div style={{padding:'14px 16px 10px'}}>
-          <div style={{display:'flex', alignItems:'flex-start', gap:10}}>
-            <Dot online={dev.isOnline} recording={dev.isRecording} size={11} />
+      <Card accent={color} style={{marginBottom:10, overflow:'hidden'}}>
+        {/* ── Top: identity + status (single padded block) ── */}
+        <div style={{padding:'11px 13px 9px'}}>
+          <div style={{display:'flex', alignItems:'flex-start', gap:9}}>
+            <Dot online={dev.isOnline} recording={dev.isRecording} size={10} />
 
             <div style={{flex:1, minWidth:0}}>
               {editing ? (
-                <div style={{display:'flex', gap:6, marginBottom:4}}>
+                <div style={{display:'flex', gap:6, marginBottom:2}}>
                   <input
                     value={name} autoFocus
                     onChange={e=>setName(e.target.value)}
                     onKeyDown={e=>{ if(e.key==='Enter')save(); if(e.key==='Escape')setEditing(false); }}
                     style={{
-                      flex:1, fontSize:15, padding:'5px 10px', borderRadius:8, minWidth:0,
+                      flex:1, fontSize:14, padding:'4px 9px', borderRadius:7, minWidth:0,
                       border:'1.5px solid #4A90A4', outline:'none',
                     }}
                   />
@@ -564,116 +587,99 @@
                   <Btn sm outline color="#718096" onClick={()=>setEditing(false)}>✕</Btn>
                 </div>
               ) : (
-                <div style={{display:'flex', alignItems:'center', gap:4, flexWrap:'wrap'}}>
-                  <span style={{fontSize:16, fontWeight:700, color:'#1A202C', wordBreak:'break-all'}}>
+                <div style={{display:'flex', alignItems:'center', gap:4, minWidth:0}}>
+                  <span style={{
+                    fontSize:15, fontWeight:700, color:'#1A202C', minWidth:0,
+                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                  }}>
                     {dev.deviceName}
                   </span>
                   <button
                     onClick={()=>{ setName(dev.deviceName); setEditing(true); }}
-                    style={{color:'#CBD5E0', fontSize:14, padding:'0 2px', flexShrink:0}}
+                    style={{color:'#CBD5E0', fontSize:13, padding:'0 4px', flexShrink:0, background:'none', border:'none', cursor:'pointer'}}
                   >✎</button>
                 </div>
               )}
               {subline && (
-                <div style={{fontSize:11, color:'#A0AEC0', marginTop:2, lineHeight:1.4}}>
+                <div style={{
+                  fontSize:11, color:'#A0AEC0', marginTop:1, lineHeight:1.3,
+                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                }}>
                   {subline}
                 </div>
               )}
             </div>
 
-            {/* Status pill */}
+            {/* Status pill (compact) */}
             <div style={{flexShrink:0, textAlign:'right'}}>
               <Pill color={dev.isRecording?'#C53030':dev.isOnline?'#276749':'#718096'}
                     bg={dev.isRecording?'#FFF5F5':dev.isOnline?'#F0FFF4':'#F7FAFC'}>
                 {dev.isRecording
-                  ? `● REC${timer ? ' '+fmtTimer(timer) : ''}`
-                  : dev.isOnline ? '● Online' : '○ Offline'}
+                  ? `REC${timer ? ' '+fmtTimer(timer) : ''}`
+                  : dev.isOnline ? 'Online' : 'Offline'}
               </Pill>
               {!dev.isOnline && dev.lastSeen && (
-                <div style={{fontSize:10, color:'#A0AEC0', marginTop:3}}>{timeAgo(dev.lastSeen)}</div>
+                <div style={{fontSize:10, color:'#A0AEC0', marginTop:2}}>{timeAgo(dev.lastSeen)}</div>
               )}
             </div>
           </div>
 
-          {/* Upload queue */}
-          {dev.uploadQueueStatus
-            ? <QueueBadge q={dev.uploadQueueStatus} />
-            : dev.pendingUploads > 0
-              ? <div style={{marginTop:8,fontSize:12,color:'#718096'}}>
-                  ⏳ {dev.pendingUploads} pending upload{dev.pendingUploads!==1?'s':''}
-                </div>
-              : null
-          }
-          {dev.connectionHealthy === false && dev.isOnline && (
-            <div style={{marginTop:6,fontSize:11,color:'#DD6B20'}}>⚠ Unstable connection</div>
-          )}
-          {dev.notificationsEnabled === false && (
-            <div style={{marginTop:6,fontSize:11,color:'#E53E3E'}}>🔕 Notifications disabled on device</div>
+          {/* Status flags row — only renders if there is something to show */}
+          {(dev.uploadQueueStatus || dev.pendingUploads > 0 || (dev.connectionHealthy === false && dev.isOnline) || dev.notificationsEnabled === false) && (
+            <div style={{marginTop:6, display:'flex', flexDirection:'column', gap:3}}>
+              {dev.uploadQueueStatus
+                ? <QueueBadge q={dev.uploadQueueStatus} />
+                : dev.pendingUploads > 0
+                  ? <div style={{fontSize:11,color:'#718096'}}>
+                      ⏳ {dev.pendingUploads} pending upload{dev.pendingUploads!==1?'s':''}
+                    </div>
+                  : null
+              }
+              {dev.connectionHealthy === false && dev.isOnline && (
+                <div style={{fontSize:11,color:'#DD6B20'}}>⚠ Unstable connection</div>
+              )}
+              {dev.notificationsEnabled === false && (
+                <div style={{fontSize:11,color:'#E53E3E'}}>🔕 Notifications disabled on device</div>
+              )}
+            </div>
           )}
         </div>
 
-        {/* ── Action row (only when online) ── */}
+        {/* ── Action row (single line, equal-flex; no wrap) ── */}
         {dev.isOnline && (
-          <div style={{
-            padding:'10px 14px 14px', display:'flex', gap:8, flexWrap:'wrap',
-            borderTop:'1px solid #F7FAFC',
-          }}>
-            {dev.isRecording ? (
-              <Btn sm outline color="#E53E3E" onClick={()=>onStop(dev.deviceId)}>■ Stop</Btn>
-            ) : (
-              <Btn sm color="#4A90A4" onClick={()=>onRecord(dev.deviceId)}>◉ Record</Btn>
-            )}
-            <Btn
-              sm color="#7B68AE"
-              onClick={()=>onScreenshot(dev.deviceId)}
-              disabled={capturing}
-            >
-              {capturing ? '⏳ …' : '📷 Screenshot'}
-            </Btn>
-            {ssStatus?.status === 'uploading' && (
-              <span style={{fontSize:11,color:'#7B68AE',alignSelf:'center'}}>uploading…</span>
-            )}
-            {burstStatus?.active ? (
-              <Btn sm color="#E53E3E" onClick={()=>onBurstStop && onBurstStop(dev.deviceId)}>
-                ■ Stop Burst
-              </Btn>
-            ) : (
-              <Btn sm outline color="#D69E2E" onClick={()=>onBurstStart && onBurstStart(dev.deviceId)}>
-                🔥 Burst
-              </Btn>
-            )}
-            <Btn sm outline color="#718096" onClick={()=>setAudioOpen(!audioOpen)}>
-              🎤 {audioOpen ? '▲' : 'Audio'}
-            </Btn>
-            <Btn sm outline color="#E67E22" onClick={()=>onGetGalleryStats(dev.deviceId)}>
-              🖼 Gallery
-            </Btn>
+          <div style={{padding:'0 10px 10px', display:'flex', gap:6}}>
+            {dev.isRecording
+              ? aBtn({color:'#E53E3E', primary:true, onClick:()=>onStop(dev.deviceId), title:'Stop recording', children:'■'})
+              : aBtn({color:'#4A90A4', primary:true, onClick:()=>onRecord(dev.deviceId), title:'Start recording', children:'◉'})
+            }
+            {aBtn({color:'#7B68AE', onClick:()=>onScreenshot(dev.deviceId), disabled:capturing, title: capturing?'Capturing…':'Take screenshot', children: capturing?'⏳':'📷'})}
+            {burstStatus?.active
+              ? aBtn({color:'#E53E3E', primary:true, onClick:()=>onBurstStop && onBurstStop(dev.deviceId), title:'Stop screenshot burst', children:'■🔥'})
+              : aBtn({color:'#D69E2E', onClick:()=>onBurstStart && onBurstStart(dev.deviceId), title:'Burst screenshots — uses common duration below', children:'🔥'})
+            }
+            {aBtn({color:'#718096', onClick:()=>setAudioOpen(!audioOpen), title: audioOpen?'Hide audio panel':'Audio source', children: audioOpen?'🎤▲':'🎤'})}
+            {aBtn({color:'#E67E22', onClick:()=>onGetGalleryStats(dev.deviceId), title:'Gallery', children:'🖼'})}
           </div>
         )}
 
-        {/* ── Active burst banner ── */}
+        {/* ── Active burst banner (compact) ── */}
         {burstStatus?.active && (
           <div style={{
-            margin:'0 14px 12px', padding:'10px 12px',
-            background:'#FFFBEB', border:'1.5px solid #F6E05E', borderRadius:10,
-            display:'flex', alignItems:'center', gap:10, flexWrap:'wrap',
+            margin:'0 10px 10px', padding:'8px 10px',
+            background:'#FFFBEB', border:'1.5px solid #F6E05E', borderRadius:9,
+            display:'flex', alignItems:'center', gap:8,
           }}>
-            <span style={{fontSize:18}}>🔥</span>
-            <div style={{flex:'1 1 160px', minWidth:0}}>
-              <div style={{fontSize:13, fontWeight:700, color:'#744210'}}>
-                Burst active · 1 shot every 5s
-              </div>
-              <div style={{fontSize:11, color:'#975A16', marginTop:2}}>
-                {burstStatus.sentShots || 0}/{burstStatus.totalShots || '?'} taken ·
-                {' '}{Math.max(0, Math.ceil((burstStatus.remainingMs||0)/1000))}s left
-              </div>
+            <span style={{fontSize:14, flexShrink:0}}>🔥</span>
+            <div style={{flex:'1 1 0', minWidth:0, fontSize:11, lineHeight:1.35, color:'#744210'}}>
+              <span style={{fontWeight:700}}>Burst</span> · {burstStatus.sentShots || 0}/{burstStatus.totalShots || '?'} taken ·
+              {' '}{Math.max(0, Math.ceil((burstStatus.remainingMs||0)/1000))}s left
             </div>
           </div>
         )}
 
         {/* ── Delete button for offline devices ── */}
         {!dev.isOnline && (
-          <div style={{padding:'8px 14px 12px', borderTop:'1px solid #F7FAFC'}}>
+          <div style={{padding:'0 10px 10px'}}>
             <Btn sm outline color="#E53E3E" full onClick={()=>onDeleteDevice(dev.deviceId)}>
               🗑 Remove Offline Device
             </Btn>
@@ -692,7 +698,7 @@
 
         {/* ── Device description / note ── */}
         {onSaveNote && (
-          <div style={{padding:'0 14px 12px'}}>
+          <div style={{padding:'0 10px 10px'}}>
             <NoteWidget
               kind="devices"
               deviceId={dev.deviceId}
@@ -3376,10 +3382,13 @@
         {/* ── Toast ─────────────────────────────────────────── */}
         <Toast toast={toast} onDismiss={()=>setToast(null)} />
 
-        {/* ── Scrollable content ────────────────────────────── */}
+        {/* ── Scrollable content ──────────────────────────────
+             paddingBottom must match the bottom action bar's height (it's
+             a fixed-height 2-row bar = ~108px) so the last device card is
+             never hidden under it. */}
         <div style={{
           flex:1, padding:'14px 12px',
-          paddingBottom:`calc(${tab==='devices'&&onlineDev.length>0 ? '88' : '24'}px + var(--safe-bottom))`,
+          paddingBottom:`calc(${tab==='devices'&&onlineDev.length>0 ? '120' : '24'}px + var(--safe-bottom))`,
         }}>
 
           {/* DEVICES */}
@@ -3596,67 +3605,91 @@
           )}
         </div>
 
-        {/* ── Floating action bar (Devices tab only) ─────────── */}
+        {/* ── Floating action bar (Devices tab only) ───────────
+             Two deterministic rows of fixed height. Never wraps,
+             never overflows the device cards above it.              */}
         {tab === 'devices' && onlineDev.length > 0 && (
           <div style={{
             position:'fixed', bottom:0, left:0, right:0, zIndex:180,
             background:'#FFF', borderTop:'1px solid #E2E8F0',
-            padding:`10px 10px calc(10px + var(--safe-bottom))`,
-            display:'flex', gap:6, alignItems:'center', flexWrap:'wrap',
+            padding:`8px 10px calc(8px + var(--safe-bottom))`,
+            display:'flex', flexDirection:'column', gap:7,
             boxSizing:'border-box',
             boxShadow:'0 -2px 14px rgba(0,0,0,0.09)',
           }}>
-            {/* Duration picker (dropdown + custom minutes input) */}
-            <select
-              value={mergedDurations.some(d=>d.value===duration) ? duration : ''}
-              onChange={e=>{ if (e.target.value) setDuration(Number(e.target.value)); }}
-              style={{
-                flexShrink:0, height:44, padding:'0 8px', fontSize:13, fontWeight:600,
-                borderRadius:10, border:'1.5px solid #E2E8F0', background:'#F7FAFC',
-                color:'#2D3748', WebkitAppearance:'none', cursor:'pointer',
-              }}
-            >
-              <option value="" disabled>Custom…</option>
-              {mergedDurations.map(d=><option key={d.value} value={d.value}>{d.label}</option>)}
-            </select>
-            <input
-              type="number" min="1" step="1" inputMode="numeric"
-              placeholder="min"
-              value={Math.round(duration/60) || ''}
-              onChange={e=>{
-                const n = parseInt(e.target.value, 10);
-                if (!isNaN(n) && n > 0) setDuration(n * 60);
-                else if (e.target.value === '') setDuration(0);
-              }}
-              title="Custom minutes"
-              style={{
-                flexShrink:0, width:60, height:44, padding:'0 8px', fontSize:13, fontWeight:600,
-                borderRadius:10, border:'1.5px solid #E2E8F0', background:'#FFF',
-                color:'#2D3748', textAlign:'center',
-              }}
-            />
+            {/* Row 1 — Duration controls (compact, fits any phone width) */}
+            <div style={{display:'flex', alignItems:'center', gap:6}}>
+              <span style={{fontSize:11, fontWeight:700, color:'#718096', flexShrink:0, letterSpacing:0.3}}>
+                ⏱ DURATION
+              </span>
+              <select
+                value={mergedDurations.some(d=>d.value===duration) ? duration : ''}
+                onChange={e=>{ if (e.target.value) setDuration(Number(e.target.value)); }}
+                style={{
+                  flex:'1 1 0', minWidth:0, height:36, padding:'0 8px', fontSize:13, fontWeight:600,
+                  borderRadius:8, border:'1.5px solid #E2E8F0', background:'#F7FAFC',
+                  color:'#2D3748', WebkitAppearance:'none', cursor:'pointer',
+                }}
+              >
+                <option value="" disabled>Custom…</option>
+                {mergedDurations.map(d=><option key={d.value} value={d.value}>{d.label}</option>)}
+              </select>
+              <input
+                type="number" min="1" step="1" inputMode="numeric"
+                placeholder="min"
+                value={Math.round(duration/60) || ''}
+                onChange={e=>{
+                  const n = parseInt(e.target.value, 10);
+                  if (!isNaN(n) && n > 0) setDuration(n * 60);
+                  else if (e.target.value === '') setDuration(0);
+                }}
+                title="Custom minutes"
+                style={{
+                  flexShrink:0, width:60, height:36, padding:'0 8px', fontSize:13, fontWeight:600,
+                  borderRadius:8, border:'1.5px solid #E2E8F0', background:'#FFF',
+                  color:'#2D3748', textAlign:'center',
+                }}
+              />
+            </div>
 
-            {/* Record all */}
-            <Btn
-              color="#4A90A4"
-              onClick={recordAll}
-              disabled={onlineDev.every(d=>d.isRecording)}
-              style={{flex:'1 1 140px', minWidth:0, padding:'0 12px'}}
-            >
-              ◉ Record All ({onlineDev.length})
-            </Btn>
-
-            {/* Stop all (only when something is recording) */}
-            {anyRec && (
-              <Btn outline color="#E53E3E" onClick={stopAll} style={{flexShrink:0}}>
-                ■ Stop
-              </Btn>
-            )}
-
-            {/* Screenshot all */}
-            <Btn color="#7B68AE" onClick={shotAll} style={{flexShrink:0, padding:'0 14px'}}>
-              📷
-            </Btn>
+            {/* Row 2 — Bulk action buttons. Equal-flex so they share the
+                width and never wrap. Stop only appears while recording. */}
+            <div style={{display:'flex', gap:6}}>
+              <button
+                onClick={recordAll}
+                disabled={onlineDev.every(d=>d.isRecording)}
+                style={{
+                  flex:'2 1 0', minWidth:0, height:42, padding:'0 10px', fontSize:13, fontWeight:700,
+                  borderRadius:9, border:'none',
+                  background: onlineDev.every(d=>d.isRecording) ? '#E2E8F0' : '#4A90A4',
+                  color: onlineDev.every(d=>d.isRecording) ? '#A0AEC0' : '#FFF',
+                  cursor: onlineDev.every(d=>d.isRecording) ? 'not-allowed' : 'pointer',
+                  display:'flex', alignItems:'center', justifyContent:'center', gap:4,
+                  whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
+                  boxShadow:'0 1px 2px rgba(0,0,0,0.06)',
+                }}
+              >◉ Record All ({onlineDev.length})</button>
+              {anyRec && (
+                <button
+                  onClick={stopAll}
+                  title="Stop all recordings"
+                  style={{
+                    flex:'1 1 0', minWidth:0, height:42, padding:'0 10px', fontSize:13, fontWeight:700,
+                    borderRadius:9, border:'1.5px solid #E53E3E', background:'#FFF', color:'#E53E3E',
+                    cursor:'pointer', whiteSpace:'nowrap',
+                  }}
+                >■ Stop</button>
+              )}
+              <button
+                onClick={shotAll}
+                title="Screenshot all online devices"
+                style={{
+                  flex:'1 1 0', minWidth:0, height:42, padding:'0 10px', fontSize:14, fontWeight:700,
+                  borderRadius:9, border:'none', background:'#7B68AE', color:'#FFF',
+                  cursor:'pointer', boxShadow:'0 1px 2px rgba(0,0,0,0.06)',
+                }}
+              >📷</button>
+            </div>
           </div>
         )}
 
