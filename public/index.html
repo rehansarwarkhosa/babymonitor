@@ -151,6 +151,45 @@
     return dt.toISOString();
   };
 
+  // Local YYYY-MM-DD key from any Date/ISO/timestamp/null. Returns '' for unknown.
+  const dateKeyOf = (v) => {
+    if (!v) return '';
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const dd = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  };
+  // Heading like "Wed, May 1, 2026" (or "Today" / "Yesterday" when applicable)
+  const fmtDateHeading = (key) => {
+    if (!key) return 'Unknown date';
+    const [y,m,d] = key.split('-').map(Number);
+    if (!y) return 'Unknown date';
+    const dt = new Date(y, m-1, d);
+    const today = new Date(); today.setHours(0,0,0,0);
+    const diffDays = Math.round((today - dt) / 86400000);
+    const base = dt.toLocaleDateString([], {weekday:'short', month:'short', day:'numeric', year:'numeric'});
+    if (diffDays === 0) return `Today · ${base}`;
+    if (diffDays === 1) return `Yesterday · ${base}`;
+    return base;
+  };
+  // Group an array of items into [{ key, label, items }] sorted newest first.
+  // getDate(item) returns a Date/ISO/timestamp; falls back to created if needed.
+  const groupByDay = (items, getDate) => {
+    const map = {};
+    (items || []).forEach(it => {
+      const key = dateKeyOf(getDate(it)) || 'unknown';
+      (map[key] = map[key] || []).push(it);
+    });
+    const keys = Object.keys(map).sort((a,b) => {
+      if (a === 'unknown') return 1;
+      if (b === 'unknown') return -1;
+      return a < b ? 1 : a > b ? -1 : 0;
+    });
+    return keys.map(k => ({ key:k, label: k==='unknown' ? 'Unknown date' : fmtDateHeading(k), items: map[k] }));
+  };
+
   const timeAgo = (s) => {
     if (!s) return '';
     const d = Math.floor((Date.now() - new Date(s)) / 1000);
@@ -490,7 +529,7 @@
   }
 
   /* ─── Device Card ───────────────────────────────────────────── */
-  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onRename, onSetAudioSource, onTestAudio, onDeleteDevice, onGetGalleryStats, timer, ssStatus, audioTesting, note, onSaveNote}) {
+  function DeviceCard({dev, selectedDuration, onRecord, onStop, onScreenshot, onBurstStart, onBurstStop, burstStatus, onRename, onSetAudioSource, onTestAudio, onDeleteDevice, onGetGalleryStats, timer, ssStatus, audioTesting, note, onSaveNote}) {
     const [editing, setEditing] = useState(false);
     const [name, setName]       = useState(dev.deviceName);
     const [audioOpen, setAudioOpen] = useState(false);
@@ -594,12 +633,41 @@
             {ssStatus?.status === 'uploading' && (
               <span style={{fontSize:11,color:'#7B68AE',alignSelf:'center'}}>uploading…</span>
             )}
+            {burstStatus?.active ? (
+              <Btn sm color="#E53E3E" onClick={()=>onBurstStop && onBurstStop(dev.deviceId)}>
+                ■ Stop Burst
+              </Btn>
+            ) : (
+              <Btn sm outline color="#D69E2E" onClick={()=>onBurstStart && onBurstStart(dev.deviceId)}>
+                🔥 Burst
+              </Btn>
+            )}
             <Btn sm outline color="#718096" onClick={()=>setAudioOpen(!audioOpen)}>
               🎤 {audioOpen ? '▲' : 'Audio'}
             </Btn>
             <Btn sm outline color="#E67E22" onClick={()=>onGetGalleryStats(dev.deviceId)}>
               🖼 Gallery
             </Btn>
+          </div>
+        )}
+
+        {/* ── Active burst banner ── */}
+        {burstStatus?.active && (
+          <div style={{
+            margin:'0 14px 12px', padding:'10px 12px',
+            background:'#FFFBEB', border:'1.5px solid #F6E05E', borderRadius:10,
+            display:'flex', alignItems:'center', gap:10, flexWrap:'wrap',
+          }}>
+            <span style={{fontSize:18}}>🔥</span>
+            <div style={{flex:'1 1 160px', minWidth:0}}>
+              <div style={{fontSize:13, fontWeight:700, color:'#744210'}}>
+                Burst active · 1 shot every 5s
+              </div>
+              <div style={{fontSize:11, color:'#975A16', marginTop:2}}>
+                {burstStatus.sentShots || 0}/{burstStatus.totalShots || '?'} taken ·
+                {' '}{Math.max(0, Math.ceil((burstStatus.remainingMs||0)/1000))}s left
+              </div>
+            </div>
           </div>
         )}
 
@@ -774,10 +842,45 @@
     );
   }
 
+  /* ─── Collapsible date sub-section header (shared) ──────────── */
+  function DateSubHeader({color, label, count, countLabel, open, onToggle, onDeleteDate, onZipDate, dateKey}) {
+    return (
+      <div style={{
+        display:'flex', alignItems:'center', gap:8, flexWrap:'wrap',
+        padding:'8px 10px', margin:'8px 0',
+        background: color+'0E',
+        border:`1px dashed ${color+'66'}`, borderRadius:8,
+      }}>
+        <button onClick={onToggle} style={{
+          flex:'1 1 auto', minWidth:0, display:'flex', alignItems:'center', gap:8,
+          background:'transparent', border:'none', padding:0, cursor:'pointer', textAlign:'left',
+        }}>
+          <span style={{fontSize:13, fontWeight:700, color:'#2D3748'}}>📅 {label}</span>
+          <span style={{fontSize:11, color:'#718096'}}>· {count} {countLabel}</span>
+          <span style={{fontSize:10, color:'#A0AEC0', marginLeft:'auto'}}>{open ? '▲' : '▼'}</span>
+        </button>
+        {onZipDate && (
+          <button onClick={()=>onZipDate(dateKey)} title={`Download all from ${label} as ZIP`} style={{
+            fontSize:11, fontWeight:600, padding:'4px 9px', borderRadius:6,
+            border:'1px solid #C6F6D5', color:'#38A169', background:'#F0FFF4', cursor:'pointer',
+          }}>⬇ ZIP</button>
+        )}
+        {onDeleteDate && (
+          <button onClick={()=>onDeleteDate(dateKey)} title={`Delete all from ${label}`} style={{
+            fontSize:11, fontWeight:600, padding:'4px 9px', borderRadius:6,
+            border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+          }}>🗑 Delete this date</button>
+        )}
+      </div>
+    );
+  }
+
   /* ─── Device group block (Recordings) ───────────────────────── */
-  function RecGroup({deviceId, group, onDelete, onDeleteAll, onStar, favSet, inFavorites, notesMap, onSaveNote, onEnhance, enhancingEngines}) {
+  function RecGroup({deviceId, group, onDelete, onDeleteAll, onDateDelete, onZipAll, onZipDate, onStar, favSet, inFavorites, notesMap, onSaveNote, onEnhance, enhancingEngines}) {
     const [open, setOpen] = useState(false);
+    const [openDates, setOpenDates] = useState({});
     const color = devColor(deviceId);
+    const toggleDate = (k) => setOpenDates(p => ({ ...p, [k]: !p[k] }));
     return (
       <div style={{marginBottom:18}}>
         <button
@@ -807,14 +910,20 @@
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:'0 14px',
           }}>
-            {!inFavorites && (
-              <div style={{padding:'10px 0', borderBottom:'1px solid #F0F4F5'}}>
+            <div style={{padding:'10px 0', borderBottom:'1px solid #F0F4F5', display:'flex', gap:8, flexWrap:'wrap'}}>
+              {onZipAll && (
+                <button onClick={()=>onZipAll(deviceId)} style={{
+                  flex:'1 1 140px', fontSize:12, fontWeight:600, padding:'8px 10px', borderRadius:8,
+                  border:'1px solid #C6F6D5', color:'#38A169', background:'#F0FFF4', cursor:'pointer',
+                }}>⬇ Download All as ZIP</button>
+              )}
+              {!inFavorites && (
                 <button onClick={()=>onDeleteAll(deviceId)} style={{
-                  width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
+                  flex:'1 1 140px', fontSize:12, fontWeight:600, padding:'8px 10px', borderRadius:8,
                   border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
                 }}>🗑 Delete All Recordings</button>
-              </div>
-            )}
+              )}
+            </div>
             {(() => {
               const baseOf = (fn) => {
                 let b = fn;
@@ -858,41 +967,62 @@
                 }
               });
               if (current) cards.push(current);
-              return cards.map(card => (
-                <div key={card.parent.filename} style={{
-                  background:'#FFF',
-                  border:'1px solid #E2E8F0',
-                  borderRadius:10,
-                  boxShadow:'0 1px 3px rgba(0,0,0,0.06)',
-                  margin:'10px 0',
-                  overflow:'hidden',
-                }}>
-                  <RecRow
-                    key={card.parent.filename} rec={card.parent} deviceId={deviceId}
-                    isChild={false}
-                    onDelete={onDelete} onStar={onStar}
-                    starred={favSet ? favSet.has(card.parent.filename) : false}
-                    inFavorites={inFavorites}
-                    note={notesMap ? notesMap[card.parent.filename] : ''}
-                    onSaveNote={onSaveNote}
-                    onEnhance={onEnhance}
-                    enhancingEngines={enhancingEngines}
-                  />
-                  {card.children.map(ch => (
-                    <RecRow
-                      key={ch.filename} rec={ch} deviceId={deviceId}
-                      isChild={true}
-                      onDelete={onDelete} onStar={onStar}
-                      starred={favSet ? favSet.has(ch.filename) : false}
-                      inFavorites={inFavorites}
-                      note={notesMap ? notesMap[ch.filename] : ''}
-                      onSaveNote={onSaveNote}
-                      onEnhance={onEnhance}
-                      enhancingEngines={enhancingEngines}
+              const dateGroups = groupByDay(cards, c => parseRecordedAt(c.parent.filename) || c.parent.created);
+              return dateGroups.map(dg => {
+                const dateOpen = !!openDates[dg.key];
+                const filenamesInDate = [];
+                dg.items.forEach(c => {
+                  filenamesInDate.push(c.parent.filename);
+                  c.children.forEach(ch => filenamesInDate.push(ch.filename));
+                });
+                return (
+                  <div key={dg.key}>
+                    <DateSubHeader
+                      color={color} label={dg.label} count={dg.items.length}
+                      countLabel={dg.items.length===1?'recording':'recordings'}
+                      open={dateOpen} onToggle={()=>toggleDate(dg.key)}
+                      dateKey={dg.key}
+                      onZipDate={onZipDate ? ()=>onZipDate(deviceId, filenamesInDate, dg.label) : null}
+                      onDeleteDate={onDateDelete ? (k)=>onDateDelete(deviceId, filenamesInDate, dg.label) : null}
                     />
-                  ))}
-                </div>
-              ));
+                    {dateOpen && dg.items.map(card => (
+                      <div key={card.parent.filename} style={{
+                        background:'#FFF',
+                        border:'1px solid #E2E8F0',
+                        borderRadius:10,
+                        boxShadow:'0 1px 3px rgba(0,0,0,0.06)',
+                        margin:'10px 0',
+                        overflow:'hidden',
+                      }}>
+                        <RecRow
+                          key={card.parent.filename} rec={card.parent} deviceId={deviceId}
+                          isChild={false}
+                          onDelete={onDelete} onStar={onStar}
+                          starred={favSet ? favSet.has(card.parent.filename) : false}
+                          inFavorites={inFavorites}
+                          note={notesMap ? notesMap[card.parent.filename] : ''}
+                          onSaveNote={onSaveNote}
+                          onEnhance={onEnhance}
+                          enhancingEngines={enhancingEngines}
+                        />
+                        {card.children.map(ch => (
+                          <RecRow
+                            key={ch.filename} rec={ch} deviceId={deviceId}
+                            isChild={true}
+                            onDelete={onDelete} onStar={onStar}
+                            starred={favSet ? favSet.has(ch.filename) : false}
+                            inFavorites={inFavorites}
+                            note={notesMap ? notesMap[ch.filename] : ''}
+                            onSaveNote={onSaveNote}
+                            onEnhance={onEnhance}
+                            enhancingEngines={enhancingEngines}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                );
+              });
             })()}
           </div>
         )}
@@ -967,8 +1097,10 @@
   }
 
   /* ─── Device group block (Screenshots) ──────────────────────── */
-  function ShotGroup({deviceId, group, onDelete, onDeleteAll, onLightbox, onStar, favSet, inFavorites, notesMap, onSaveNote}) {
+  function ShotGroup({deviceId, group, onDelete, onDeleteAll, onDateDelete, onZipAll, onZipDate, onLightbox, onStar, favSet, inFavorites, notesMap, onSaveNote}) {
     const [open, setOpen] = useState(false);
+    const [openDates, setOpenDates] = useState({});
+    const toggleDate = (k) => setOpenDates(p => ({ ...p, [k]: !p[k] }));
     const color = devColor(deviceId);
     return (
       <div style={{marginBottom:18}}>
@@ -999,27 +1131,55 @@
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:10,
           }}>
-            {!inFavorites && (
-              <button onClick={()=>onDeleteAll(deviceId)} style={{
-                width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
-                border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
-                marginBottom:10,
-              }}>🗑 Delete All Screenshots</button>
-            )}
-            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12}}>
-              {group.screenshots.map(shot => (
-                <ShotThumb
-                  key={shot.filename}
-                  shot={shot} deviceId={deviceId}
-                  onDelete={onDelete} onLightbox={onLightbox}
-                  onStar={onStar}
-                  starred={favSet ? favSet.has(shot.filename) : false}
-                  inFavorites={inFavorites}
-                  note={notesMap ? notesMap[shot.filename] : ''}
-                  onSaveNote={onSaveNote}
-                />
-              ))}
+            <div style={{display:'flex', gap:8, flexWrap:'wrap', marginBottom:10}}>
+              {onZipAll && (
+                <button onClick={()=>onZipAll(deviceId)} style={{
+                  flex:'1 1 140px', fontSize:12, fontWeight:600, padding:'8px 10px', borderRadius:8,
+                  border:'1px solid #C6F6D5', color:'#38A169', background:'#F0FFF4', cursor:'pointer',
+                }}>⬇ Download All as ZIP</button>
+              )}
+              {!inFavorites && (
+                <button onClick={()=>onDeleteAll(deviceId)} style={{
+                  flex:'1 1 140px', fontSize:12, fontWeight:600, padding:'8px 10px', borderRadius:8,
+                  border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+                }}>🗑 Delete All Screenshots</button>
+              )}
             </div>
+            {(() => {
+              const dateGroups = groupByDay(group.screenshots, s => parseRecordedAt(s.filename) || s.created);
+              return dateGroups.map(dg => {
+                const dateOpen = !!openDates[dg.key];
+                const fns = dg.items.map(s => s.filename);
+                return (
+                  <div key={dg.key}>
+                    <DateSubHeader
+                      color={color} label={dg.label} count={dg.items.length}
+                      countLabel={dg.items.length===1?'shot':'shots'}
+                      open={dateOpen} onToggle={()=>toggleDate(dg.key)}
+                      dateKey={dg.key}
+                      onZipDate={onZipDate ? ()=>onZipDate(deviceId, fns, dg.label) : null}
+                      onDeleteDate={onDateDelete ? (k)=>onDateDelete(deviceId, fns, dg.label) : null}
+                    />
+                    {dateOpen && (
+                      <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12, marginBottom:6}}>
+                        {dg.items.map(shot => (
+                          <ShotThumb
+                            key={shot.filename}
+                            shot={shot} deviceId={deviceId}
+                            onDelete={onDelete} onLightbox={onLightbox}
+                            onStar={onStar}
+                            starred={favSet ? favSet.has(shot.filename) : false}
+                            inFavorites={inFavorites}
+                            note={notesMap ? notesMap[shot.filename] : ''}
+                            onSaveNote={onSaveNote}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              });
+            })()}
           </div>
         )}
       </div>
@@ -1086,8 +1246,10 @@
   }
 
   /* ─── Device group block (Gallery) ──────────────────────────── */
-  function GalleryGroup({deviceId, group, onDelete, onDeleteAll, onLightbox, onStar, favSet, inFavorites, notesMap, onSaveNote}) {
+  function GalleryGroup({deviceId, group, onDelete, onDeleteAll, onDateDelete, onZipAll, onZipDate, onLightbox, onStar, favSet, inFavorites, notesMap, onSaveNote}) {
     const [open, setOpen] = useState(false);
+    const [openDates, setOpenDates] = useState({});
+    const toggleDate = (k) => setOpenDates(p => ({ ...p, [k]: !p[k] }));
     const color = devColor(deviceId);
     return (
       <div style={{marginBottom:18}}>
@@ -1118,27 +1280,55 @@
             border:`1.5px solid ${color+'33'}`, borderTop:'none',
             padding:10,
           }}>
-            {!inFavorites && (
-              <button onClick={()=>onDeleteAll(deviceId)} style={{
-                width:'100%', fontSize:12, fontWeight:600, padding:'8px 0', borderRadius:8,
-                border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
-                marginBottom:10,
-              }}>🗑 Delete All Gallery Images</button>
-            )}
-            <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12}}>
-              {group.images.map(img => (
-                <GalleryThumb
-                  key={img.filename}
-                  img={img} deviceId={deviceId}
-                  onDelete={onDelete} onLightbox={onLightbox}
-                  onStar={onStar}
-                  starred={favSet ? favSet.has(img.filename) : false}
-                  inFavorites={inFavorites}
-                  note={notesMap ? notesMap[img.filename] : ''}
-                  onSaveNote={onSaveNote}
-                />
-              ))}
+            <div style={{display:'flex', gap:8, flexWrap:'wrap', marginBottom:10}}>
+              {onZipAll && (
+                <button onClick={()=>onZipAll(deviceId)} style={{
+                  flex:'1 1 140px', fontSize:12, fontWeight:600, padding:'8px 10px', borderRadius:8,
+                  border:'1px solid #C6F6D5', color:'#38A169', background:'#F0FFF4', cursor:'pointer',
+                }}>⬇ Download All as ZIP</button>
+              )}
+              {!inFavorites && (
+                <button onClick={()=>onDeleteAll(deviceId)} style={{
+                  flex:'1 1 140px', fontSize:12, fontWeight:600, padding:'8px 10px', borderRadius:8,
+                  border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
+                }}>🗑 Delete All Gallery Images</button>
+              )}
             </div>
+            {(() => {
+              const dateGroups = groupByDay(group.images, i => i.dateTaken || i.created);
+              return dateGroups.map(dg => {
+                const dateOpen = !!openDates[dg.key];
+                const fns = dg.items.map(i => i.filename);
+                return (
+                  <div key={dg.key}>
+                    <DateSubHeader
+                      color={color} label={dg.label} count={dg.items.length}
+                      countLabel={dg.items.length===1?'image':'images'}
+                      open={dateOpen} onToggle={()=>toggleDate(dg.key)}
+                      dateKey={dg.key}
+                      onZipDate={onZipDate ? ()=>onZipDate(deviceId, fns, dg.label) : null}
+                      onDeleteDate={onDateDelete ? (k)=>onDateDelete(deviceId, fns, dg.label) : null}
+                    />
+                    {dateOpen && (
+                      <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12, marginBottom:6}}>
+                        {dg.items.map(img => (
+                          <GalleryThumb
+                            key={img.filename}
+                            img={img} deviceId={deviceId}
+                            onDelete={onDelete} onLightbox={onLightbox}
+                            onStar={onStar}
+                            starred={favSet ? favSet.has(img.filename) : false}
+                            inFavorites={inFavorites}
+                            note={notesMap ? notesMap[img.filename] : ''}
+                            onSaveNote={onSaveNote}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              });
+            })()}
           </div>
         )}
       </div>
@@ -2169,6 +2359,8 @@
     const [galleryMeta,     setGalleryMeta]     = useState({});
     const [galleryProgress, setGalleryProgress] = useState({});
     const [ssStatus,        setSsStatus]        = useState({});
+    const [bursts,          setBursts]          = useState({});
+    const [burstTick,       setBurstTick]       = useState(0);
     const [timers,          setTimers]          = useState({});
     const [duration,        setDuration]        = useState(60);
     const [customDurations, setCustomDurations] = useState([]);
@@ -2376,6 +2568,18 @@
         showToast(`Screenshot failed on ${d.deviceName||d.deviceId}: ${d.error}`, 'error');
         setSsStatus(p => { const c={...p}; delete c[d.deviceId]; return c; });
       });
+
+      socket.on('burst_status', d => {
+        if (!d || !d.deviceId) return;
+        setBursts(p => {
+          const c = { ...p };
+          if (d.active) c[d.deviceId] = d;
+          else delete c[d.deviceId];
+          return c;
+        });
+      });
+      socket.on('active_bursts', snap => setBursts(snap || {}));
+      socket.on('burst_error', d => showToast(`Burst error: ${d.error||'unknown'}`, 'error'));
       socket.on('recording_error', d =>
         showToast(`Recording error on ${d.deviceName||d.deviceId}: ${d.error}`, 'error')
       );
@@ -2468,6 +2672,7 @@
       fetchFavorites();
       fetchNotes();
       fetchStorage();
+      fetch('/api/screenshot-bursts').then(r=>r.ok?r.json():{}).then(setBursts).catch(()=>{});
       const storageInterval = setInterval(fetchStorage, 30000);
       const reconcileInterval = setInterval(() => {
         fetch('/devices').then(r => r.ok ? r.json() : null).then(snap => {
@@ -2531,6 +2736,64 @@
       setSsStatus(p => ({ ...p, [id]: { status:'requesting' } }));
       socketRef.current.emit('take_screenshot', { targetDeviceId:id });
     };
+
+    const burstStart = async (id) => {
+      const dur = duration;
+      if (!dur || dur < 15) {
+        showToast('Set a duration of at least 15 seconds first', 'warn');
+        return;
+      }
+      const dev = devices[id];
+      const minLabel = formatDurationLabel(dur);
+      if (!(await askPassword({
+        title:'🔥 Confirm Burst Screenshots',
+        message:`Take a screenshot every 5 seconds for ${minLabel} on ${dev?.deviceName||id}? Runs server-side — closing this tab won't stop it.`,
+        confirmLabel:'Start Burst', confirmColor:'#D69E2E',
+      }))) return;
+      try {
+        const r = await fetch(`/api/devices/${encodeURIComponent(id)}/screenshot-burst`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ durationSeconds: dur }),
+        });
+        if (!r.ok) {
+          const j = await r.json().catch(()=>({}));
+          showToast(j.error || 'Failed to start burst', 'error');
+          return;
+        }
+        showToast(`Burst started · ${minLabel}`, 'info');
+      } catch {
+        showToast('Network error starting burst', 'error');
+      }
+    };
+    const burstStop = async (id) => {
+      if (!(await askPassword({
+        title:'🔒 Stop Burst',
+        message:'Stop the active screenshot burst on this device?',
+        confirmLabel:'Stop', confirmColor:'#E53E3E',
+      }))) return;
+      try {
+        await fetch(`/api/devices/${encodeURIComponent(id)}/screenshot-burst/stop`, { method:'POST' });
+        showToast('Burst stopped', 'info');
+      } catch {
+        showToast('Failed to stop burst', 'error');
+      }
+    };
+
+    /* Live ticker for active-burst remaining time (1Hz when any burst is active) */
+    useEffect(() => {
+      const anyActive = Object.values(bursts).some(b => b && b.active);
+      if (!anyActive) return;
+      const t = setInterval(() => setBurstTick(n => (n + 1) & 0xffff), 1000);
+      return () => clearInterval(t);
+    }, [bursts]);
+    const liveBursts = useMemo(() => {
+      const now = Date.now();
+      const out = {};
+      Object.entries(bursts).forEach(([id, b]) => {
+        if (b && b.active) out[id] = { ...b, remainingMs: Math.max(0, (b.endTime||0) - now) };
+      });
+      return out;
+    }, [bursts, burstTick]);
     const rename = (id, n) =>
       socketRef.current.emit('update_device_name', { targetDeviceId:id, newName:n });
 
@@ -2679,6 +2942,125 @@
       ));
       fetchGallery();
       showToast(`Deleted ${list.length} image(s)`, 'info');
+    };
+
+    // ── ZIP download (server-streamed) ────────────────────────
+    // Items: [{ kind, deviceId, filename }]. Triggers a browser download.
+    const downloadZip = async (items, zipName) => {
+      if (!items || items.length === 0) {
+        showToast('Nothing to zip', 'info');
+        return;
+      }
+      showToast(`Preparing ZIP — ${items.length} file${items.length===1?'':'s'}…`, 'info');
+      try {
+        const r = await fetch('/api/zip', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ items, zipName }),
+        });
+        if (!r.ok) { showToast('ZIP failed', 'error'); return; }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = zipName;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+        showToast(`Downloaded ${zipName}`, 'info');
+      } catch (e) {
+        showToast('ZIP failed: ' + (e.message||'network error'), 'error');
+      }
+    };
+    const safeZipName = (parts) =>
+      parts.filter(Boolean).join('_').replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 70) + '.zip';
+    const deviceNameOf = (deviceId) => devices[deviceId]?.deviceName || deviceId.slice(0,10);
+
+    const zipDeviceRec = (deviceId, filenames) => {
+      const items = filenames.map(fn => ({ kind:'recordings', deviceId, filename: fn }));
+      downloadZip(items, safeZipName(['recordings', deviceNameOf(deviceId)]));
+    };
+    const zipDeviceShot = (deviceId, filenames) => {
+      const items = filenames.map(fn => ({ kind:'screenshots', deviceId, filename: fn }));
+      downloadZip(items, safeZipName(['screenshots', deviceNameOf(deviceId)]));
+    };
+    const zipDeviceGallery = (deviceId, filenames) => {
+      const items = filenames.map(fn => ({ kind:'gallery', deviceId, filename: fn }));
+      downloadZip(items, safeZipName(['gallery', deviceNameOf(deviceId)]));
+    };
+    const zipDateRec = (deviceId, filenames, label) => {
+      const items = filenames.map(fn => ({ kind:'recordings', deviceId, filename: fn }));
+      downloadZip(items, safeZipName(['recordings', deviceNameOf(deviceId), label]));
+    };
+    const zipDateShot = (deviceId, filenames, label) => {
+      const items = filenames.map(fn => ({ kind:'screenshots', deviceId, filename: fn }));
+      downloadZip(items, safeZipName(['screenshots', deviceNameOf(deviceId), label]));
+    };
+    const zipDateGallery = (deviceId, filenames, label) => {
+      const items = filenames.map(fn => ({ kind:'gallery', deviceId, filename: fn }));
+      downloadZip(items, safeZipName(['gallery', deviceNameOf(deviceId), label]));
+    };
+
+    // Date-bounded bulk delete — used by date sub-group ✕ button.
+    // Respects deletePolicyAsk; protects favorites in non-favorites contexts.
+    const delDateRec = async (deviceId, filenames, label) => {
+      const favs = new Set(favorites.recordings?.[deviceId] || []);
+      const list = filenames.filter(f => !favs.has(f));
+      if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
+      if (!(await deletePolicyAsk(`Delete ${list.length} recording(s) from ${label}? Favorites will be kept.`))) return;
+      await Promise.all(list.map(fn =>
+        fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(fn)}`, {method:'DELETE'})
+      ));
+      fetchRec();
+      showToast(`Deleted ${list.length} recording(s) from ${label}`, 'info');
+    };
+    const delDateShot = async (deviceId, filenames, label) => {
+      const favs = new Set(favorites.screenshots?.[deviceId] || []);
+      const list = filenames.filter(f => !favs.has(f));
+      if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
+      if (!(await deletePolicyAsk(`Delete ${list.length} screenshot(s) from ${label}? Favorites will be kept.`))) return;
+      await Promise.all(list.map(fn =>
+        fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(fn)}`, {method:'DELETE'})
+      ));
+      fetchShot();
+      showToast(`Deleted ${list.length} screenshot(s) from ${label}`, 'info');
+    };
+    const delDateGallery = async (deviceId, filenames, label) => {
+      const favs = new Set(favorites.gallery?.[deviceId] || []);
+      const list = filenames.filter(f => !favs.has(f));
+      if (list.length === 0) { showToast('Nothing to delete — all are favorites', 'info'); return; }
+      if (!(await deletePolicyAsk(`Delete ${list.length} image(s) from ${label}? Favorites will be kept.`))) return;
+      await Promise.all(list.map(fn =>
+        fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(fn)}`, {method:'DELETE'})
+      ));
+      fetchGallery();
+      showToast(`Deleted ${list.length} image(s) from ${label}`, 'info');
+    };
+    // Favorites variants — always password protected, also remove favorite flag.
+    const delFavDateRec = async (deviceId, filenames, label) => {
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+      if (!(await askPassword({ title:'🔒 Confirm delete', message:`Delete ${filenames.length} favorite recording(s) from ${label}?`, confirmLabel:'Delete', confirmColor:'#E53E3E' }))) return;
+      await Promise.all(filenames.map(fn =>
+        fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(fn)}`, {method:'DELETE'})
+      ));
+      filenames.forEach(fn => removeFav('recordings', deviceId, fn));
+      fetchRec();
+    };
+    const delFavDateShot = async (deviceId, filenames, label) => {
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+      if (!(await askPassword({ title:'🔒 Confirm delete', message:`Delete ${filenames.length} favorite screenshot(s) from ${label}?`, confirmLabel:'Delete', confirmColor:'#E53E3E' }))) return;
+      await Promise.all(filenames.map(fn =>
+        fetch(`/api/screenshots/${encodeURIComponent(deviceId)}/${encodeURIComponent(fn)}`, {method:'DELETE'})
+      ));
+      filenames.forEach(fn => removeFav('screenshots', deviceId, fn));
+      fetchShot();
+    };
+    const delFavDateGallery = async (deviceId, filenames, label) => {
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+      if (!(await askPassword({ title:'🔒 Confirm delete', message:`Delete ${filenames.length} favorite image(s) from ${label}?`, confirmLabel:'Delete', confirmColor:'#E53E3E' }))) return;
+      await Promise.all(filenames.map(fn =>
+        fetch(`/api/gallery/${encodeURIComponent(deviceId)}/${encodeURIComponent(fn)}`, {method:'DELETE'})
+      ));
+      filenames.forEach(fn => removeFav('gallery', deviceId, fn));
+      fetchGallery();
     };
 
     // Favorite deletion — always password protected (even if setting is off),
@@ -2923,6 +3305,9 @@
                     onRecord={record}
                     onStop={stop}
                     onScreenshot={shot}
+                    onBurstStart={burstStart}
+                    onBurstStop={burstStop}
+                    burstStatus={liveBursts[dev.deviceId]}
                     onRename={rename}
                     onSetAudioSource={setAudioSource}
                     onTestAudio={testAudio}
@@ -2943,7 +3328,9 @@
               ? <Empty icon="🎙" title="No recordings yet" sub="Start a recording from the Devices tab" />
               : Object.entries(visibleRec).map(([id, g]) => (
                   <RecGroup key={id} deviceId={id} group={g}
-                    onDelete={delRec} onDeleteAll={delAllRec}
+                    onDelete={delRec} onDeleteAll={delAllRec} onDateDelete={delDateRec}
+                    onZipAll={(d)=>zipDeviceRec(d, g.recordings.map(r=>r.filename))}
+                    onZipDate={zipDateRec}
                     onStar={(d,f)=>addFav('recordings',d,f)}
                     favSet={favSetFor('recordings', id)}
                     notesMap={notes.recordings?.[id]}
@@ -2960,7 +3347,9 @@
               ? <Empty icon="🖼" title="No screenshots yet" sub="Take screenshots from the Devices tab" />
               : Object.entries(visibleShot).map(([id, g]) => (
                   <ShotGroup key={id} deviceId={id} group={g}
-                    onDelete={delShot} onDeleteAll={delAllShot} onLightbox={setLightbox}
+                    onDelete={delShot} onDeleteAll={delAllShot} onDateDelete={delDateShot} onLightbox={setLightbox}
+                    onZipAll={(d)=>zipDeviceShot(d, g.screenshots.map(s=>s.filename))}
+                    onZipDate={zipDateShot}
                     onStar={(d,f)=>addFav('screenshots',d,f)}
                     favSet={favSetFor('screenshots', id)}
                     notesMap={notes.screenshots?.[id]}
@@ -2981,18 +3370,24 @@
                     <div key={id}>
                       {favRec[id] && (
                         <RecGroup deviceId={id} group={favRec[id]}
-                          onDelete={delFavRec} inFavorites
+                          onDelete={delFavRec} onDateDelete={delFavDateRec} inFavorites
+                          onZipAll={(d)=>zipDeviceRec(d, favRec[id].recordings.map(r=>r.filename))}
+                          onZipDate={zipDateRec}
                           notesMap={notes.recordings?.[id]} onSaveNote={saveNote}
                           onEnhance={enhanceRec} enhancingSet={enhancingRec} />
                       )}
                       {favShot[id] && (
                         <ShotGroup deviceId={id} group={favShot[id]}
-                          onDelete={delFavShot} onLightbox={setLightbox} inFavorites
+                          onDelete={delFavShot} onDateDelete={delFavDateShot} onLightbox={setLightbox} inFavorites
+                          onZipAll={(d)=>zipDeviceShot(d, favShot[id].screenshots.map(s=>s.filename))}
+                          onZipDate={zipDateShot}
                           notesMap={notes.screenshots?.[id]} onSaveNote={saveNote} />
                       )}
                       {favGallery[id] && (
                         <GalleryGroup deviceId={id} group={favGallery[id]}
-                          onDelete={delFavGallery} onLightbox={setLightbox} inFavorites
+                          onDelete={delFavGallery} onDateDelete={delFavDateGallery} onLightbox={setLightbox} inFavorites
+                          onZipAll={(d)=>zipDeviceGallery(d, favGallery[id].images.map(i=>i.filename))}
+                          onZipDate={zipDateGallery}
                           notesMap={notes.gallery?.[id]} onSaveNote={saveNote} />
                       )}
                     </div>
@@ -3026,7 +3421,9 @@
                 ? <Empty icon="🖼" title="No gallery images yet" sub="Use the Gallery button on a device to fetch images" />
                 : Object.entries(visibleGallery).map(([id, g]) => (
                     <GalleryGroup key={id} deviceId={id} group={g}
-                      onDelete={delGallery} onDeleteAll={delAllGallery} onLightbox={setLightbox}
+                      onDelete={delGallery} onDeleteAll={delAllGallery} onDateDelete={delDateGallery} onLightbox={setLightbox}
+                      onZipAll={(d)=>zipDeviceGallery(d, g.images.map(i=>i.filename))}
+                      onZipDate={zipDateGallery}
                       onStar={(d,f)=>addFav('gallery',d,f)}
                       favSet={favSetFor('gallery', id)}
                       notesMap={notes.gallery?.[id]}

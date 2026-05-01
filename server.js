@@ -8,6 +8,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const https = require("https");
+const archiver = require("archiver");
 let ffmpegPath = null;
 try { ffmpegPath = require("ffmpeg-static"); } catch (e) { /* optional */ }
 
@@ -117,6 +118,7 @@ const FAVORITES_FILE = path.join(__dirname, "favorites.json");
 const AUTH_FILE = path.join(__dirname, "auth.json");
 const NOTES_FILE = path.join(__dirname, "notes.json");
 const SETTINGS_FILE = path.join(__dirname, "settings.json");
+const BURSTS_FILE = path.join(__dirname, "active-bursts.json");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -265,6 +267,10 @@ const galleryImages = new Map(); // deviceId -> [{ imageId, originalName, filena
 // State
 const devices = new Map();
 const serverStartTime = Date.now();
+
+// Active screenshot bursts: deviceId -> { intervalId, timeoutId, deviceName,
+//   durationSeconds, intervalMs, startedAt, endTime, totalShots, sentShots }
+const activeBursts = new Map();
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
@@ -1227,6 +1233,190 @@ app.delete("/api/screenshots/:deviceId/:filename", (req, res) => {
   }
 });
 
+// ─── SCREENSHOT BURST (server-driven, survives tab close + restart) ──
+// 5-second interval timers held in-memory; persisted so a restart can resume.
+const BURST_INTERVAL_MS = 5000;
+const BURST_MIN_SECONDS = 15;
+const BURST_MAX_SECONDS = 4 * 60 * 60; // 4 hours hard cap
+
+function burstSnapshot(b) {
+  return {
+    deviceId: b.deviceId,
+    deviceName: b.deviceName,
+    active: true,
+    durationSeconds: b.durationSeconds,
+    intervalMs: b.intervalMs,
+    startedAt: b.startedAt,
+    endTime: b.endTime,
+    totalShots: b.totalShots,
+    sentShots: b.sentShots,
+    remainingMs: Math.max(0, b.endTime - Date.now()),
+  };
+}
+
+function broadcastBurstStatus(b, extra = {}) {
+  io.emit("burst_status", { ...burstSnapshot(b), ...extra });
+}
+
+function persistBursts() {
+  try {
+    const out = [];
+    activeBursts.forEach((b) => {
+      out.push({
+        deviceId: b.deviceId,
+        deviceName: b.deviceName,
+        durationSeconds: b.durationSeconds,
+        intervalMs: b.intervalMs,
+        startedAt: b.startedAt,
+        endTime: b.endTime,
+        totalShots: b.totalShots,
+        sentShots: b.sentShots,
+      });
+    });
+    fs.writeFileSync(BURSTS_FILE, JSON.stringify(out, null, 2));
+  } catch (e) {
+    log(`persistBursts error: ${e.message}`);
+  }
+}
+
+function stopBurst(deviceId, reason = "stopped") {
+  const b = activeBursts.get(deviceId);
+  if (!b) return false;
+  if (b.intervalId) clearInterval(b.intervalId);
+  if (b.timeoutId) clearTimeout(b.timeoutId);
+  activeBursts.delete(deviceId);
+  persistBursts();
+  io.emit("burst_status", {
+    deviceId: b.deviceId,
+    deviceName: b.deviceName,
+    active: false,
+    reason,
+    totalShots: b.totalShots,
+    sentShots: b.sentShots,
+    endedAt: Date.now(),
+  });
+  log(`Burst ${reason} on ${b.deviceName} (${deviceId}): ${b.sentShots}/${b.totalShots} shots`);
+  return true;
+}
+
+function startBurst(deviceId, durationSeconds, opts = {}) {
+  const dev = devices.get(deviceId);
+  if (!dev && !opts.allowOfflineRestore) throw new Error("Device not found");
+  let dur = Number(durationSeconds);
+  if (!Number.isFinite(dur) || dur < BURST_MIN_SECONDS) dur = BURST_MIN_SECONDS;
+  if (dur > BURST_MAX_SECONDS) dur = BURST_MAX_SECONDS;
+
+  // Replace any existing burst on this device
+  if (activeBursts.has(deviceId)) stopBurst(deviceId, "replaced");
+
+  const now = opts.startedAt || Date.now();
+  const endTime = opts.endTime || now + dur * 1000;
+  const totalShots = Math.max(1, Math.floor((endTime - now) / BURST_INTERVAL_MS));
+
+  const b = {
+    deviceId,
+    deviceName: (dev && dev.deviceName) || opts.deviceName || deviceId,
+    durationSeconds: dur,
+    intervalMs: BURST_INTERVAL_MS,
+    startedAt: now,
+    endTime,
+    totalShots,
+    sentShots: opts.sentShots || 0,
+    intervalId: null,
+    timeoutId: null,
+  };
+
+  const tick = () => {
+    const cur = activeBursts.get(deviceId);
+    if (!cur) return;
+    const d = devices.get(deviceId);
+    if (d && d.isOnline && d.socketId) {
+      io.to(d.socketId).emit("take_screenshot", { targetDeviceId: deviceId });
+      cur.sentShots += 1;
+    }
+    broadcastBurstStatus(cur);
+    persistBursts();
+  };
+
+  b.intervalId = setInterval(tick, BURST_INTERVAL_MS);
+  const remaining = Math.max(0, endTime - Date.now());
+  b.timeoutId = setTimeout(() => stopBurst(deviceId, "completed"), remaining);
+
+  activeBursts.set(deviceId, b);
+
+  // Fire one immediately so the user sees instant feedback (only for fresh starts)
+  if (!opts.skipImmediate) {
+    const d2 = devices.get(deviceId);
+    if (d2 && d2.isOnline && d2.socketId) {
+      io.to(d2.socketId).emit("take_screenshot", { targetDeviceId: deviceId });
+      b.sentShots += 1;
+    }
+  }
+  broadcastBurstStatus(b);
+  persistBursts();
+  log(`Burst started on ${dev.deviceName} (${deviceId}): ${dur}s, ${totalShots} planned shots`);
+  return b;
+}
+
+function restoreBursts() {
+  if (!fs.existsSync(BURSTS_FILE)) return;
+  let saved = [];
+  try { saved = JSON.parse(fs.readFileSync(BURSTS_FILE, "utf8")) || []; }
+  catch { saved = []; }
+  const now = Date.now();
+  const survivors = [];
+  saved.forEach((s) => {
+    if (!s || !s.deviceId || !s.endTime) return;
+    if (s.endTime - now < 5000) return; // too close to expiry, skip
+    survivors.push(s);
+  });
+  if (survivors.length === 0) {
+    try { fs.unlinkSync(BURSTS_FILE); } catch {}
+    return;
+  }
+  // Restore immediately. The tick loop already skips emits while the device
+  // is offline, so the burst auto-resumes the moment the device reconnects.
+  survivors.forEach((s) => {
+    try {
+      startBurst(s.deviceId, Math.max(BURST_MIN_SECONDS, Math.floor((s.endTime - Date.now()) / 1000)), {
+        startedAt: s.startedAt,
+        endTime: s.endTime,
+        sentShots: s.sentShots || 0,
+        deviceName: s.deviceName,
+        allowOfflineRestore: true,
+        skipImmediate: true,
+      });
+      log(`Burst restored on ${s.deviceId} (${s.deviceName||'?'}), ${Math.floor((s.endTime - Date.now())/1000)}s remaining`);
+    } catch (e) {
+      log(`Burst restore failed for ${s.deviceId}: ${e.message}`);
+    }
+  });
+}
+
+// REST: start a burst
+app.post("/api/devices/:deviceId/screenshot-burst", (req, res) => {
+  try {
+    const dur = Number((req.body && (req.body.durationSeconds ?? req.body.duration)) || 0);
+    const b = startBurst(req.params.deviceId, dur);
+    res.json({ success: true, burst: burstSnapshot(b) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// REST: stop a burst
+app.post("/api/devices/:deviceId/screenshot-burst/stop", (req, res) => {
+  const ok = stopBurst(req.params.deviceId, "stopped");
+  res.json({ success: ok });
+});
+
+// REST: snapshot of all active bursts
+app.get("/api/screenshot-bursts", (req, res) => {
+  const out = {};
+  activeBursts.forEach((b, id) => { out[id] = burstSnapshot(b); });
+  res.json(out);
+});
+
 // Command device to take screenshot via REST
 app.post("/api/devices/:deviceId/screenshot", (req, res) => {
   const dev = devices.get(req.params.deviceId);
@@ -1671,6 +1861,62 @@ app.delete("/api/gallery/:deviceId", (req, res) => {
     return res.json({ success: true, deleted: count });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete gallery images" });
+  }
+});
+
+// ─── ZIP DOWNLOAD (streaming) ─────────────────────────────
+//
+// Body: { items:[{ kind, deviceId, filename }], zipName? }
+//   kind ∈ "recordings" | "screenshots" | "gallery"
+// Streams a .zip directly to the response. Skips items that don't exist
+// rather than failing the whole archive.
+const KIND_DIR = {
+  recordings: RECORDINGS_DIR,
+  screenshots: SCREENSHOTS_DIR,
+  gallery: GALLERY_DIR,
+};
+function safeJoin(baseDir, deviceId, filename) {
+  // Reject path-traversal attempts. deviceId and filename must be plain segments.
+  if (!deviceId || !filename) return null;
+  if (/[\\/]|\.\./.test(deviceId) || /[\\/]|\.\./.test(filename)) return null;
+  const full = path.join(baseDir, deviceId, filename);
+  if (!full.startsWith(baseDir + path.sep) && full !== baseDir) return null;
+  return full;
+}
+app.post("/api/zip", (req, res) => {
+  try {
+    const { items, zipName } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "No items provided" });
+    }
+    const safeName = (zipName && /^[A-Za-z0-9._-]{1,80}$/.test(zipName))
+      ? zipName
+      : `baby-monitor-${Date.now()}.zip`;
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}"`);
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    archive.on("warning", (e) => log(`zip warning: ${e.message}`));
+    archive.on("error", (e) => {
+      log(`zip error: ${e.message}`);
+      try { res.status(500).end(); } catch {}
+    });
+    archive.pipe(res);
+
+    let added = 0, skipped = 0;
+    items.forEach((it) => {
+      if (!it || !KIND_DIR[it.kind]) { skipped++; return; }
+      const full = safeJoin(KIND_DIR[it.kind], it.deviceId, it.filename);
+      if (!full || !fs.existsSync(full)) { skipped++; return; }
+      // Group inside the zip by kind/device for clarity
+      const inner = `${it.kind}/${it.deviceId}/${it.filename}`;
+      archive.file(full, { name: inner });
+      added++;
+    });
+    log(`ZIP "${safeName}": ${added} added, ${skipped} skipped`);
+    archive.finalize();
+  } catch (e) {
+    log(`zip endpoint error: ${e.message}`);
+    if (!res.headersSent) res.status(500).json({ error: e.message });
   }
 });
 
@@ -2340,6 +2586,37 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Screenshot burst: start / stop via socket from web dashboard
+  socket.on("start_screenshot_burst", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      const dur = Number((data && (data.durationSeconds ?? data.duration)) || 0);
+      if (!targetId) return;
+      const b = startBurst(targetId, dur);
+      socket.emit("burst_status", burstSnapshot(b));
+    } catch (e) {
+      log(`start_screenshot_burst error: ${e.message}`);
+      socket.emit("burst_error", { error: e.message });
+    }
+  });
+
+  socket.on("stop_screenshot_burst", (data) => {
+    try {
+      const targetId = data && data.targetDeviceId;
+      if (!targetId) return;
+      stopBurst(targetId, "stopped");
+    } catch (e) {
+      log(`stop_screenshot_burst error: ${e.message}`);
+    }
+  });
+
+  // Send active burst snapshots to a freshly connected client
+  socket.on("get_active_bursts", () => {
+    const out = {};
+    activeBursts.forEach((b, id) => { out[id] = burstSnapshot(b); });
+    socket.emit("active_bursts", out);
+  });
+
   socket.on("screenshot_status", (data) => {
     try {
       log(`Screenshot status from ${(data && data.deviceName) || "unknown"}: ${(data && data.status) || ""}`);
@@ -2636,4 +2913,5 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   log(`Baby Monitor server running on http://localhost:${PORT}`);
+  restoreBursts();
 });
