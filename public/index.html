@@ -842,35 +842,85 @@
     );
   }
 
-  /* ─── Collapsible date sub-section header (shared) ──────────── */
+  /* ─── Collapsible date sub-section ──────────────────────────────
+     Subordinate to the device card. Visual rules:
+       · No card chrome of its own — sits flush as a nested row.
+       · 3px left accent in the device color = "still inside this device".
+       · When expanded, content gets the same left rail to read as
+         contained, indented one notch.
+       · Action chips are icon-first and shrink-wrapped so the row fits
+         on a phone in a single line.                                  */
   function DateSubHeader({color, label, count, countLabel, open, onToggle, onDeleteDate, onZipDate, dateKey}) {
+    const accent = color + '99';
     return (
-      <div style={{
-        display:'flex', alignItems:'center', gap:8, flexWrap:'wrap',
-        padding:'8px 10px', margin:'8px 0',
-        background: color+'0E',
-        border:`1px dashed ${color+'66'}`, borderRadius:8,
-      }}>
-        <button onClick={onToggle} style={{
-          flex:'1 1 auto', minWidth:0, display:'flex', alignItems:'center', gap:8,
-          background:'transparent', border:'none', padding:0, cursor:'pointer', textAlign:'left',
-        }}>
-          <span style={{fontSize:13, fontWeight:700, color:'#2D3748'}}>📅 {label}</span>
-          <span style={{fontSize:11, color:'#718096'}}>· {count} {countLabel}</span>
-          <span style={{fontSize:10, color:'#A0AEC0', marginLeft:'auto'}}>{open ? '▲' : '▼'}</span>
-        </button>
+      <div
+        onClick={onToggle}
+        style={{
+          display:'flex', alignItems:'center', gap:8,
+          padding:'9px 10px 9px 12px',
+          margin:'10px 0 0',
+          background: open ? color+'10' : '#FFF',
+          borderTop: `1px solid ${color}1F`,
+          borderLeft: `3px solid ${accent}`,
+          borderRadius:'0 8px 8px 0',
+          cursor:'pointer',
+          transition:'background .15s',
+        }}
+      >
+        <span style={{
+          width:18, height:18, fontSize:10, color:color,
+          display:'inline-flex', alignItems:'center', justifyContent:'center',
+          transition:'transform .15s',
+          transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+          flexShrink:0,
+        }}>▶</span>
+        <div style={{flex:'1 1 auto', minWidth:0, display:'flex', alignItems:'baseline', gap:6, flexWrap:'wrap'}}>
+          <span style={{fontSize:13, fontWeight:600, color:'#2D3748', whiteSpace:'nowrap'}}>{label}</span>
+          <span style={{
+            fontSize:10, fontWeight:700, color: color, background: color+'18',
+            padding:'1px 7px', borderRadius:999, whiteSpace:'nowrap', letterSpacing:.2,
+          }}>{count} {countLabel}</span>
+        </div>
         {onZipDate && (
-          <button onClick={()=>onZipDate(dateKey)} title={`Download all from ${label} as ZIP`} style={{
-            fontSize:11, fontWeight:600, padding:'4px 9px', borderRadius:6,
-            border:'1px solid #C6F6D5', color:'#38A169', background:'#F0FFF4', cursor:'pointer',
-          }}>⬇ ZIP</button>
+          <button
+            onClick={(e)=>{ e.stopPropagation(); onZipDate(dateKey); }}
+            title={`Download all from ${label} as ZIP`}
+            style={{
+              height:28, padding:'0 9px', fontSize:11, fontWeight:600, borderRadius:6,
+              border:'1px solid #C6F6D5', color:'#38A169', background:'#F0FFF4',
+              cursor:'pointer', display:'flex', alignItems:'center', gap:3, flexShrink:0,
+            }}
+          >⬇ ZIP</button>
         )}
         {onDeleteDate && (
-          <button onClick={()=>onDeleteDate(dateKey)} title={`Delete all from ${label}`} style={{
-            fontSize:11, fontWeight:600, padding:'4px 9px', borderRadius:6,
-            border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5', cursor:'pointer',
-          }}>🗑 Delete this date</button>
+          <button
+            onClick={(e)=>{ e.stopPropagation(); onDeleteDate(dateKey); }}
+            title={`Delete all from ${label}`}
+            style={{
+              height:28, padding:'0 9px', fontSize:11, fontWeight:600, borderRadius:6,
+              border:'1px solid #FED7D7', color:'#E53E3E', background:'#FFF5F5',
+              cursor:'pointer', flexShrink:0,
+            }}
+          >🗑</button>
         )}
+      </div>
+    );
+  }
+
+  /* Shared "nested" wrapper that visually attaches expanded date items to
+     the date header above, using the same left accent in device color. */
+  function DateBody({color, children, padded}) {
+    return (
+      <div style={{
+        borderLeft: `3px solid ${color+'33'}`,
+        marginLeft: 0,
+        paddingLeft: padded ? 10 : 0,
+        paddingRight: padded ? 4 : 0,
+        paddingBottom: 4,
+        background: '#FFF',
+        borderRadius: '0 0 8px 0',
+      }}>
+        {children}
       </div>
     );
   }
@@ -882,34 +932,45 @@
     const color = devColor(deviceId);
     const toggleDate = (k) => setOpenDates(p => ({ ...p, [k]: !p[k] }));
     return (
-      <div style={{marginBottom:18}}>
+      <div style={{
+        marginBottom:18, borderRadius:12, overflow:'hidden',
+        boxShadow: open ? '0 2px 10px rgba(15,42,53,0.08)' : 'none',
+        border:`1.5px solid ${color+'33'}`,
+        borderLeft:`4px solid ${color}`,
+      }}>
         <button
           onClick={()=>setOpen(!open)}
           style={{
             width:'100%', display:'flex', alignItems:'center', gap:10,
-            padding:'10px 14px',
-            background: color+'14',
-            borderRadius: open ? '12px 12px 0 0' : 12,
-            border:`1.5px solid ${color+'33'}`,
-            borderBottom: open ? 'none' : undefined,
+            padding:'12px 14px',
+            background: open ? color+'18' : color+'0E',
+            border:'none', cursor:'pointer',
+            transition:'background .15s',
           }}
         >
-          <span style={{width:12, height:12, borderRadius:'50%', background:color, flexShrink:0}} />
-          <span style={{flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#2D3748'}}>
+          <span style={{
+            width:18, height:18, fontSize:11, color:color,
+            display:'inline-flex', alignItems:'center', justifyContent:'center',
+            transition:'transform .15s',
+            transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+            flexShrink:0,
+          }}>▶</span>
+          <span style={{
+            flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#1A202C',
+            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+          }}>
             {group.deviceName}
           </span>
-          <span style={{fontSize:12, color:'#718096'}}>
-            {group.recordings.length} recording{group.recordings.length!==1?'s':''}
+          <span style={{
+            fontSize:11, fontWeight:700, color: color, background: color+'22',
+            padding:'3px 10px', borderRadius:999, whiteSpace:'nowrap', letterSpacing:.2,
+          }}>
+            {group.recordings.length} {group.recordings.length===1?'recording':'recordings'}
           </span>
-          <span style={{fontSize:11, color:'#A0AEC0'}}>{open ? '▲' : '▼'}</span>
         </button>
 
         {open && (
-          <div style={{
-            background:'#FFF', borderRadius:'0 0 12px 12px',
-            border:`1.5px solid ${color+'33'}`, borderTop:'none',
-            padding:'0 14px',
-          }}>
+          <div style={{background:'#FFF', padding:'0 12px 12px'}}>
             <div style={{padding:'10px 0', borderBottom:'1px solid #F0F4F5', display:'flex', gap:8, flexWrap:'wrap'}}>
               {onZipAll && (
                 <button onClick={()=>onZipAll(deviceId)} style={{
@@ -985,13 +1046,15 @@
                       onZipDate={onZipDate ? ()=>onZipDate(deviceId, filenamesInDate, dg.label) : null}
                       onDeleteDate={onDateDelete ? (k)=>onDateDelete(deviceId, filenamesInDate, dg.label) : null}
                     />
-                    {dateOpen && dg.items.map(card => (
+                    {dateOpen && (
+                      <DateBody color={color} padded>
+                        {dg.items.map(card => (
                       <div key={card.parent.filename} style={{
                         background:'#FFF',
                         border:'1px solid #E2E8F0',
                         borderRadius:10,
                         boxShadow:'0 1px 3px rgba(0,0,0,0.06)',
-                        margin:'10px 0',
+                        margin:'8px 0',
                         overflow:'hidden',
                       }}>
                         <RecRow
@@ -1019,7 +1082,9 @@
                           />
                         ))}
                       </div>
-                    ))}
+                        ))}
+                      </DateBody>
+                    )}
                   </div>
                 );
               });
@@ -1103,34 +1168,45 @@
     const toggleDate = (k) => setOpenDates(p => ({ ...p, [k]: !p[k] }));
     const color = devColor(deviceId);
     return (
-      <div style={{marginBottom:18}}>
+      <div style={{
+        marginBottom:18, borderRadius:12, overflow:'hidden',
+        boxShadow: open ? '0 2px 10px rgba(15,42,53,0.08)' : 'none',
+        border:`1.5px solid ${color+'33'}`,
+        borderLeft:`4px solid ${color}`,
+      }}>
         <button
           onClick={()=>setOpen(!open)}
           style={{
             width:'100%', display:'flex', alignItems:'center', gap:10,
-            padding:'10px 14px',
-            background: color+'14',
-            borderRadius: open ? '12px 12px 0 0' : 12,
-            border:`1.5px solid ${color+'33'}`,
-            borderBottom: open ? 'none' : undefined,
+            padding:'12px 14px',
+            background: open ? color+'18' : color+'0E',
+            border:'none', cursor:'pointer',
+            transition:'background .15s',
           }}
         >
-          <span style={{width:12, height:12, borderRadius:'50%', background:color, flexShrink:0}} />
-          <span style={{flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#2D3748'}}>
+          <span style={{
+            width:18, height:18, fontSize:11, color:color,
+            display:'inline-flex', alignItems:'center', justifyContent:'center',
+            transition:'transform .15s',
+            transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+            flexShrink:0,
+          }}>▶</span>
+          <span style={{
+            flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#1A202C',
+            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+          }}>
             {group.deviceName}
           </span>
-          <span style={{fontSize:12, color:'#718096'}}>
-            {group.screenshots.length} shot{group.screenshots.length!==1?'s':''}
+          <span style={{
+            fontSize:11, fontWeight:700, color: color, background: color+'22',
+            padding:'3px 10px', borderRadius:999, whiteSpace:'nowrap', letterSpacing:.2,
+          }}>
+            {group.screenshots.length} {group.screenshots.length===1?'shot':'shots'}
           </span>
-          <span style={{fontSize:11, color:'#A0AEC0'}}>{open ? '▲' : '▼'}</span>
         </button>
 
         {open && (
-          <div style={{
-            background:'#F7FAFC', borderRadius:'0 0 12px 12px',
-            border:`1.5px solid ${color+'33'}`, borderTop:'none',
-            padding:10,
-          }}>
+          <div style={{background:'#FFF', padding:'10px 12px 12px'}}>
             <div style={{display:'flex', gap:8, flexWrap:'wrap', marginBottom:10}}>
               {onZipAll && (
                 <button onClick={()=>onZipAll(deviceId)} style={{
@@ -1161,20 +1237,22 @@
                       onDeleteDate={onDateDelete ? (k)=>onDateDelete(deviceId, fns, dg.label) : null}
                     />
                     {dateOpen && (
-                      <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12, marginBottom:6}}>
-                        {dg.items.map(shot => (
-                          <ShotThumb
-                            key={shot.filename}
-                            shot={shot} deviceId={deviceId}
-                            onDelete={onDelete} onLightbox={onLightbox}
-                            onStar={onStar}
-                            starred={favSet ? favSet.has(shot.filename) : false}
-                            inFavorites={inFavorites}
-                            note={notesMap ? notesMap[shot.filename] : ''}
-                            onSaveNote={onSaveNote}
-                          />
-                        ))}
-                      </div>
+                      <DateBody color={color} padded>
+                        <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:10, padding:'8px 0 4px'}}>
+                          {dg.items.map(shot => (
+                            <ShotThumb
+                              key={shot.filename}
+                              shot={shot} deviceId={deviceId}
+                              onDelete={onDelete} onLightbox={onLightbox}
+                              onStar={onStar}
+                              starred={favSet ? favSet.has(shot.filename) : false}
+                              inFavorites={inFavorites}
+                              note={notesMap ? notesMap[shot.filename] : ''}
+                              onSaveNote={onSaveNote}
+                            />
+                          ))}
+                        </div>
+                      </DateBody>
                     )}
                   </div>
                 );
@@ -1206,7 +1284,9 @@
           <div style={{fontSize:11, fontWeight:600, color:'#2D3748', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
             {img.originalName || img.filename}
           </div>
-          <div style={{fontSize:10, color:'#E67E22', marginTop:2}}>{img.folderName}</div>
+          {img.folderName && img.folderName.toLowerCase() !== 'unknown' && (
+            <div style={{fontSize:10, color:'#E67E22', marginTop:2}}>{img.folderName}</div>
+          )}
           <div style={{fontSize:11, color:'#718096', marginTop:1}}>{fmtDate(img.dateTaken || img.created)}</div>
           <div style={{fontSize:11, color:'#A0AEC0', marginBottom:6}}>{fmtSize(img.size)}</div>
           <div style={{display:'flex', gap:4}}>
@@ -1252,34 +1332,45 @@
     const toggleDate = (k) => setOpenDates(p => ({ ...p, [k]: !p[k] }));
     const color = devColor(deviceId);
     return (
-      <div style={{marginBottom:18}}>
+      <div style={{
+        marginBottom:18, borderRadius:12, overflow:'hidden',
+        boxShadow: open ? '0 2px 10px rgba(15,42,53,0.08)' : 'none',
+        border:`1.5px solid ${color+'33'}`,
+        borderLeft:`4px solid ${color}`,
+      }}>
         <button
           onClick={()=>setOpen(!open)}
           style={{
             width:'100%', display:'flex', alignItems:'center', gap:10,
-            padding:'10px 14px',
-            background: color+'14',
-            borderRadius: open ? '12px 12px 0 0' : 12,
-            border:`1.5px solid ${color+'33'}`,
-            borderBottom: open ? 'none' : undefined,
+            padding:'12px 14px',
+            background: open ? color+'18' : color+'0E',
+            border:'none', cursor:'pointer',
+            transition:'background .15s',
           }}
         >
-          <span style={{width:12, height:12, borderRadius:'50%', background:color, flexShrink:0}} />
-          <span style={{flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#2D3748'}}>
+          <span style={{
+            width:18, height:18, fontSize:11, color:color,
+            display:'inline-flex', alignItems:'center', justifyContent:'center',
+            transition:'transform .15s',
+            transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+            flexShrink:0,
+          }}>▶</span>
+          <span style={{
+            flex:1, textAlign:'left', fontSize:15, fontWeight:700, color:'#1A202C',
+            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+          }}>
             {group.deviceName}
           </span>
-          <span style={{fontSize:12, color:'#718096'}}>
-            {group.images.length} image{group.images.length!==1?'s':''}
+          <span style={{
+            fontSize:11, fontWeight:700, color: color, background: color+'22',
+            padding:'3px 10px', borderRadius:999, whiteSpace:'nowrap', letterSpacing:.2,
+          }}>
+            {group.images.length} {group.images.length===1?'image':'images'}
           </span>
-          <span style={{fontSize:11, color:'#A0AEC0'}}>{open ? '▲' : '▼'}</span>
         </button>
 
         {open && (
-          <div style={{
-            background:'#F7FAFC', borderRadius:'0 0 12px 12px',
-            border:`1.5px solid ${color+'33'}`, borderTop:'none',
-            padding:10,
-          }}>
+          <div style={{background:'#FFF', padding:'10px 12px 12px'}}>
             <div style={{display:'flex', gap:8, flexWrap:'wrap', marginBottom:10}}>
               {onZipAll && (
                 <button onClick={()=>onZipAll(deviceId)} style={{
@@ -1310,20 +1401,22 @@
                       onDeleteDate={onDateDelete ? (k)=>onDateDelete(deviceId, fns, dg.label) : null}
                     />
                     {dateOpen && (
-                      <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12, marginBottom:6}}>
-                        {dg.items.map(img => (
-                          <GalleryThumb
-                            key={img.filename}
-                            img={img} deviceId={deviceId}
-                            onDelete={onDelete} onLightbox={onLightbox}
-                            onStar={onStar}
-                            starred={favSet ? favSet.has(img.filename) : false}
-                            inFavorites={inFavorites}
-                            note={notesMap ? notesMap[img.filename] : ''}
-                            onSaveNote={onSaveNote}
-                          />
-                        ))}
-                      </div>
+                      <DateBody color={color} padded>
+                        <div style={{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:10, padding:'8px 0 4px'}}>
+                          {dg.items.map(img => (
+                            <GalleryThumb
+                              key={img.filename}
+                              img={img} deviceId={deviceId}
+                              onDelete={onDelete} onLightbox={onLightbox}
+                              onStar={onStar}
+                              starred={favSet ? favSet.has(img.filename) : false}
+                              inFavorites={inFavorites}
+                              note={notesMap ? notesMap[img.filename] : ''}
+                              onSaveNote={onSaveNote}
+                            />
+                          ))}
+                        </div>
+                      </DateBody>
                     )}
                   </div>
                 );
@@ -2745,11 +2838,11 @@
       }
       const dev = devices[id];
       const minLabel = formatDurationLabel(dur);
-      if (!(await askPassword({
-        title:'🔥 Confirm Burst Screenshots',
-        message:`Take a screenshot every 5 seconds for ${minLabel} on ${dev?.deviceName||id}? Runs server-side — closing this tab won't stop it.`,
-        confirmLabel:'Start Burst', confirmColor:'#D69E2E',
-      }))) return;
+      if (!window.confirm(
+        `Start burst on ${dev?.deviceName||id}?\n` +
+        `One screenshot every 5 seconds for ${minLabel}.\n\n` +
+        `Runs on the server — closing this tab won't stop it.`
+      )) return;
       try {
         const r = await fetch(`/api/devices/${encodeURIComponent(id)}/screenshot-burst`, {
           method:'POST', headers:{'Content-Type':'application/json'},
@@ -2766,11 +2859,7 @@
       }
     };
     const burstStop = async (id) => {
-      if (!(await askPassword({
-        title:'🔒 Stop Burst',
-        message:'Stop the active screenshot burst on this device?',
-        confirmLabel:'Stop', confirmColor:'#E53E3E',
-      }))) return;
+      if (!window.confirm('Stop the active screenshot burst on this device?')) return;
       try {
         await fetch(`/api/devices/${encodeURIComponent(id)}/screenshot-burst/stop`, { method:'POST' });
         showToast('Burst stopped', 'info');
