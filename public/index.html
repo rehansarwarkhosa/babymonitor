@@ -1798,155 +1798,279 @@
     );
   }
 
-  /* ─── Recycle Bin tab ────────────────────────────────────────
-     Items are grouped: device → kind (recordings/screenshots/gallery)
-     → date sub-group (using the same groupByDay helper as the live tabs,
-     so dating matches what the user saw before they deleted the item).
-     The "Empty Recycle Bin" action is always password-protected. */
+  /* ─── Recycle Bin tab (mobile-first) ─────────────────────────
+     Layout principles:
+     • One single restore action per row (↶ icon button).
+     • Bulk restore is opt-in: tap rows to multi-select; a floating action
+       bar appears at the bottom with Restore-Selected + Clear-Selection.
+     • Devices are collapsible cards. Default: first device expanded.
+     • Date sub-headers are pure labels — no buttons in them.
+     • Every flex row uses min-width:0 + box-sizing:border-box and the action
+       column is flex-shrink:0, so nothing escapes the viewport on a 360-px screen. */
   const TRASH_KIND_META = {
-    recordings:  { label:'🎙 Recordings',  color:'#4A90A4', noun:'recording'  },
-    screenshots: { label:'📷 Screenshots', color:'#7B68AE', noun:'screenshot' },
-    gallery:     { label:'🖼 Gallery',     color:'#E67E22', noun:'image'      },
+    recordings:  { icon:'🎙', short:'Audio',  color:'#4A90A4' },
+    screenshots: { icon:'📷', short:'Shot',   color:'#7B68AE' },
+    gallery:     { icon:'🖼', short:'Image',  color:'#E67E22' },
   };
 
   function TrashTab({ items, onRestore, onEmpty }) {
+    const [selected, setSelected] = useState(() => new Set());
+    const [expanded, setExpanded] = useState(() => new Set());
+
+    // Group: deviceId → { deviceName, items[] (flat, sorted newest-deleted first) }.
+    // We deliberately do NOT sub-group by kind here — the kind is shown as a
+    // small chip on each row instead. Less nesting = less mobile clutter.
+    const byDevice = useMemo(() => {
+      const out = {};
+      (items || []).forEach(it => {
+        if (!out[it.deviceId]) out[it.deviceId] = { deviceName: it.deviceName || it.deviceId, items: [] };
+        out[it.deviceId].items.push(it);
+      });
+      Object.values(out).forEach(g => g.items.sort((a,b) => new Date(b.deletedAt) - new Date(a.deletedAt)));
+      return out;
+    }, [items]);
+
+    // Auto-expand on first render so users see content immediately. After that
+    // they control which sections are open.
+    useEffect(() => {
+      if (expanded.size === 0) {
+        const ids = Object.keys(byDevice);
+        if (ids.length > 0) setExpanded(new Set([ids[0]]));
+      }
+      // Drop selections for items that no longer exist (e.g. after a restore).
+      const live = new Set((items||[]).map(i => i.id));
+      setSelected(prev => {
+        let changed = false;
+        const next = new Set();
+        prev.forEach(id => { if (live.has(id)) next.add(id); else changed = true; });
+        return changed ? next : prev;
+      });
+    // eslint-disable-next-line
+    }, [items]);
+
+    const toggleSelect = (id) => setSelected(p => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+    const toggleExpand = (deviceId) => setExpanded(p => {
+      const n = new Set(p);
+      if (n.has(deviceId)) n.delete(deviceId); else n.add(deviceId);
+      return n;
+    });
+
     if (!items || items.length === 0) {
       return <Empty
         icon="🗑"
         title="Recycle bin is empty"
-        sub="Anything you delete — recordings, screenshots, gallery images — lands here first. Restore with one tap, or empty the bin (password required) to delete forever."
+        sub="Anything you delete lands here first. You can restore it back to its original place, or empty the bin (password required) to delete forever."
       />;
     }
-    // Group: deviceId → { deviceName, kinds: { kind: [items] } }
-    const byDevice = {};
-    items.forEach(it => {
-      if (!byDevice[it.deviceId]) byDevice[it.deviceId] = { deviceName: it.deviceName || it.deviceId, kinds: {} };
-      const dk = byDevice[it.deviceId].kinds;
-      (dk[it.kind] = dk[it.kind] || []).push(it);
-    });
+
+    const totalDevices = Object.keys(byDevice).length;
+    const totalSize = items.reduce((s, it) => s + (it.size || 0), 0);
 
     return (
-      <div>
-        {/* Sticky-ish header with counts and the destructive Empty action */}
-        <Card style={{padding:14, marginBottom:14}}>
-          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, flexWrap:'wrap'}}>
-            <div>
-              <div style={{fontSize:15, fontWeight:700, color:'#2D3748'}}>🗑 Recycle Bin</div>
-              <div style={{fontSize:12, color:'#718096', marginTop:2}}>
-                {items.length} item{items.length!==1?'s':''} across {Object.keys(byDevice).length} device{Object.keys(byDevice).length!==1?'s':''}
-              </div>
+      <div style={{paddingBottom: selected.size > 0 ? 80 : 0}}>
+        {/* ── Compact summary header. Two buttons max, never wraps. ── */}
+        <div style={{
+          background:'#FFF', border:'1px solid #E2E8F0', borderRadius:12,
+          padding:'10px 12px', marginBottom:12,
+          display:'flex', alignItems:'center', gap:10, boxSizing:'border-box',
+        }}>
+          <div style={{
+            width:40, height:40, flexShrink:0, borderRadius:10,
+            background:'#F7FAFC', display:'flex', alignItems:'center', justifyContent:'center', fontSize:20,
+          }}>🗑</div>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{fontSize:14, fontWeight:700, color:'#2D3748'}}>Recycle Bin</div>
+            <div style={{
+              fontSize:11, color:'#718096', marginTop:1,
+              overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+            }}>
+              {items.length} item{items.length!==1?'s':''} · {totalDevices} device{totalDevices!==1?'s':''} · {fmtSize(totalSize)}
             </div>
-            <Btn sm color="#E53E3E" onClick={onEmpty}>🔒 Empty Recycle Bin</Btn>
           </div>
-          <div style={{fontSize:11, color:'#A0AEC0', marginTop:8, lineHeight:1.4}}>
-            Items keep their original device, type, and date so they restore back to exactly where you deleted them from.
-          </div>
-        </Card>
+          <button
+            onClick={onEmpty}
+            style={{
+              flexShrink:0, height:36, padding:'0 12px', borderRadius:9,
+              border:'1.5px solid #E53E3E', background:'#FFF', color:'#E53E3E',
+              fontSize:12, fontWeight:700, cursor:'pointer', whiteSpace:'nowrap',
+            }}
+          >🔒 Empty</button>
+        </div>
 
+        {/* ── Device sections (collapsible) ── */}
         {Object.entries(byDevice).map(([deviceId, group]) => {
-          const allDeviceItems = Object.values(group.kinds).flat();
+          const isOpen = expanded.has(deviceId);
+          const dateGroups = groupByDay(group.items, x => x.dateTaken || x.originalCreated || x.deletedAt);
           return (
-            <Card key={deviceId} style={{marginBottom:14, padding:0, overflow:'hidden'}}>
-              {/* Device header with accent rail (matches live device cards) */}
-              <div style={{display:'flex', alignItems:'stretch'}}>
-                <div style={{width:5, background: devColor(deviceId), flexShrink:0}}/>
-                <div style={{flex:1, padding:'12px 14px'}}>
-                  <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, flexWrap:'wrap'}}>
-                    <div>
-                      <div style={{fontSize:14, fontWeight:700, color:'#2D3748'}}>{group.deviceName}</div>
-                      <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
-                        {allDeviceItems.length} deleted item{allDeviceItems.length!==1?'s':''}
-                      </div>
-                    </div>
-                    <button
-                      onClick={()=>onRestore(allDeviceItems.map(i => i.id))}
-                      style={{
-                        background:'#EBF8FF', color:'#2B6CB0', border:'1px solid #BEE3F8',
-                        fontSize:11, fontWeight:700, padding:'6px 12px', borderRadius:8, cursor:'pointer',
-                      }}
-                    >↶ Restore all ({allDeviceItems.length})</button>
+            <div key={deviceId} style={{
+              background:'#FFF', border:'1px solid #E2E8F0', borderRadius:12,
+              marginBottom:10, overflow:'hidden', boxSizing:'border-box',
+            }}>
+              {/* Device header — entire row is the toggle. No buttons inside it. */}
+              <button
+                onClick={()=>toggleExpand(deviceId)}
+                style={{
+                  width:'100%', display:'flex', alignItems:'center', gap:10,
+                  padding:'12px 12px', background: isOpen ? '#F7FAFC' : '#FFF',
+                  border:'none', borderLeft:`4px solid ${devColor(deviceId)}`,
+                  cursor:'pointer', textAlign:'left', boxSizing:'border-box',
+                }}
+              >
+                <div style={{flex:1, minWidth:0}}>
+                  <div style={{
+                    fontSize:14, fontWeight:700, color:'#2D3748',
+                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                  }}>{group.deviceName}</div>
+                  <div style={{fontSize:11, color:'#A0AEC0', marginTop:1}}>
+                    {group.items.length} deleted
                   </div>
-
-                  {Object.entries(group.kinds).map(([kind, kItems]) => {
-                    const meta = TRASH_KIND_META[kind] || { label:kind, color:'#718096', noun:'item' };
-                    const dateGroups = groupByDay(kItems, x => x.dateTaken || x.originalCreated || x.deletedAt);
-                    return (
-                      <div key={kind} style={{marginTop:12, borderTop:'1px solid #EDF2F7', paddingTop:10}}>
-                        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8}}>
-                          <div style={{fontSize:12, fontWeight:700, color: meta.color}}>
-                            {meta.label}
-                            <span style={{color:'#A0AEC0', fontWeight:500, marginLeft:6}}>· {kItems.length}</span>
-                          </div>
-                          <button
-                            onClick={()=>onRestore(kItems.map(i => i.id))}
-                            style={{background:'none', border:'none', color: meta.color, fontSize:11, fontWeight:700, cursor:'pointer'}}
-                          >↶ Restore {meta.noun}s</button>
-                        </div>
-
-                        {dateGroups.map(dg => (
-                          <div key={dg.key} style={{marginBottom:8}}>
-                            <div style={{
-                              display:'flex', alignItems:'center', justifyContent:'space-between',
-                              background:'#F7FAFC', padding:'5px 10px', borderRadius:6, marginBottom:4,
-                              borderLeft:`3px solid ${meta.color}`,
-                            }}>
-                              <div style={{fontSize:11, fontWeight:700, color:'#4A5568'}}>
-                                {dg.label}
-                                <span style={{color:'#A0AEC0', fontWeight:500, marginLeft:6}}>· {dg.items.length}</span>
-                              </div>
-                              <button
-                                onClick={()=>onRestore(dg.items.map(i => i.id))}
-                                style={{background:'none', border:'none', color: meta.color, fontSize:11, fontWeight:600, cursor:'pointer'}}
-                              >↶ Restore date</button>
-                            </div>
-                            {dg.items.map(it => (
-                              <div key={it.id} style={{
-                                display:'flex', alignItems:'center', gap:10,
-                                padding:'7px 10px', borderRadius:6, marginBottom:3,
-                                background:'#FFF', border:'1px solid #EDF2F7',
-                              }}>
-                                {(it.kind === 'screenshots' || it.kind === 'gallery') ? (
-                                  <img
-                                    src={`/api/trash/file/${it.id}`}
-                                    style={{width:40, height:40, objectFit:'cover', borderRadius:5, background:'#EDF2F7', flexShrink:0}}
-                                    onError={(e)=>{ e.target.style.display='none'; }}
-                                  />
-                                ) : (
-                                  <div style={{
-                                    width:40, height:40, borderRadius:5, background:'#EDF2F7',
-                                    display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, flexShrink:0,
-                                  }}>🎙</div>
-                                )}
-                                <div style={{flex:1, minWidth:0}}>
-                                  <div style={{
-                                    fontSize:12, fontWeight:600, color:'#2D3748',
-                                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
-                                  }} title={it.filename}>{it.filename}</div>
-                                  <div style={{fontSize:10, color:'#A0AEC0', marginTop:2}}>
-                                    {fmtSize(it.size)} · deleted {timeAgo(it.deletedAt)}
-                                    {it.folderName ? ` · ${it.folderName}` : ''}
-                                  </div>
-                                </div>
-                                <button
-                                  onClick={()=>onRestore([it.id])}
-                                  style={{
-                                    background: meta.color, color:'#FFF', border:'none',
-                                    fontWeight:700, fontSize:11, padding:'7px 12px', borderRadius:6, cursor:'pointer',
-                                    flexShrink:0,
-                                  }}
-                                >↶ Restore</button>
-                              </div>
-                            ))}
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })}
                 </div>
-              </div>
-            </Card>
+                <span style={{
+                  flexShrink:0, fontSize:14, color:'#A0AEC0',
+                  transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                  transition:'transform .15s',
+                }}>▶</span>
+              </button>
+
+              {isOpen && (
+                <div style={{padding:'4px 8px 10px'}}>
+                  {dateGroups.map(dg => (
+                    <div key={dg.key}>
+                      {/* Pure label — no action buttons (Bulk-restore via row checkboxes) */}
+                      <div style={{
+                        fontSize:10, fontWeight:700, color:'#A0AEC0',
+                        textTransform:'uppercase', letterSpacing:0.5,
+                        padding:'10px 6px 6px',
+                      }}>
+                        {dg.label} · {dg.items.length}
+                      </div>
+                      {dg.items.map(it => {
+                        const meta = TRASH_KIND_META[it.kind] || { icon:'📄', short:it.kind, color:'#718096' };
+                        const isSel = selected.has(it.id);
+                        return (
+                          <div key={it.id} style={{
+                            display:'flex', alignItems:'center', gap:8,
+                            padding:'8px 6px', borderRadius:8, marginBottom:2,
+                            background: isSel ? '#EBF8FF' : 'transparent',
+                            boxSizing:'border-box',
+                          }}>
+                            {/* Tap thumbnail/checkbox area to toggle selection */}
+                            <button
+                              onClick={()=>toggleSelect(it.id)}
+                              aria-label={isSel ? 'Deselect' : 'Select'}
+                              style={{
+                                position:'relative', width:44, height:44, flexShrink:0,
+                                padding:0, border:'none', background:'transparent', cursor:'pointer',
+                              }}
+                            >
+                              {(it.kind === 'screenshots' || it.kind === 'gallery') ? (
+                                <img
+                                  src={`/api/trash/file/${it.id}`}
+                                  style={{
+                                    width:'100%', height:'100%', objectFit:'cover', borderRadius:7,
+                                    background:'#EDF2F7', display:'block',
+                                    border: isSel ? '2px solid #2B6CB0' : '1px solid #E2E8F0',
+                                  }}
+                                  onError={(e)=>{ e.target.style.visibility='hidden'; }}
+                                />
+                              ) : (
+                                <div style={{
+                                  width:'100%', height:'100%', borderRadius:7,
+                                  background: isSel ? '#BEE3F8' : '#EDF2F7',
+                                  display:'flex', alignItems:'center', justifyContent:'center',
+                                  fontSize:20,
+                                  border: isSel ? '2px solid #2B6CB0' : '1px solid #E2E8F0',
+                                  boxSizing:'border-box',
+                                }}>{meta.icon}</div>
+                              )}
+                              {isSel && (
+                                <span style={{
+                                  position:'absolute', top:-4, right:-4, width:18, height:18,
+                                  borderRadius:9, background:'#2B6CB0', color:'#FFF',
+                                  fontSize:11, fontWeight:700,
+                                  display:'flex', alignItems:'center', justifyContent:'center',
+                                  border:'2px solid #FFF',
+                                }}>✓</span>
+                              )}
+                            </button>
+
+                            {/* Filename + meta. min-width:0 is critical here so the
+                                ellipsis works inside a flex row on Android. */}
+                            <div style={{flex:1, minWidth:0}}>
+                              <div style={{
+                                fontSize:12, fontWeight:600, color:'#2D3748',
+                                overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                              }} title={it.filename}>{it.filename}</div>
+                              <div style={{
+                                fontSize:10, color:'#A0AEC0', marginTop:2,
+                                display:'flex', alignItems:'center', gap:6, flexWrap:'wrap',
+                              }}>
+                                <span style={{
+                                  background: meta.color+'22', color: meta.color,
+                                  fontWeight:700, padding:'1px 6px', borderRadius:6,
+                                }}>{meta.short}</span>
+                                <span style={{whiteSpace:'nowrap'}}>{fmtSize(it.size)}</span>
+                                <span style={{whiteSpace:'nowrap'}}>· {timeAgo(it.deletedAt)}</span>
+                              </div>
+                            </div>
+
+                            {/* Single restore action. Icon-only on narrow screens. */}
+                            <button
+                              onClick={()=>onRestore([it.id])}
+                              title="Restore"
+                              aria-label="Restore"
+                              style={{
+                                flexShrink:0, width:40, height:40, borderRadius:9,
+                                border:`1.5px solid ${meta.color}`, background:'#FFF',
+                                color: meta.color, fontSize:18, fontWeight:700,
+                                cursor:'pointer', padding:0,
+                                display:'flex', alignItems:'center', justifyContent:'center',
+                              }}
+                            >↶</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           );
         })}
+
+        {/* ── Floating bulk-action bar — only visible while items are selected. ── */}
+        {selected.size > 0 && (
+          <div style={{
+            position:'fixed', left:0, right:0, bottom:0, zIndex:300,
+            padding:`10px 12px calc(10px + var(--safe-bottom))`,
+            background:'#FFF', borderTop:'1px solid #E2E8F0',
+            boxShadow:'0 -4px 18px rgba(0,0,0,0.12)',
+            display:'flex', alignItems:'center', gap:8, boxSizing:'border-box',
+          }}>
+            <button
+              onClick={()=>setSelected(new Set())}
+              style={{
+                flexShrink:0, height:44, padding:'0 14px', borderRadius:10,
+                border:'1.5px solid #E2E8F0', background:'#FFF', color:'#4A5568',
+                fontSize:13, fontWeight:600, cursor:'pointer',
+              }}
+            >Cancel</button>
+            <button
+              onClick={()=>onRestore(Array.from(selected))}
+              style={{
+                flex:1, minWidth:0, height:44, padding:'0 12px', borderRadius:10,
+                border:'none', background:'#2B6CB0', color:'#FFF',
+                fontSize:14, fontWeight:700, cursor:'pointer',
+                display:'flex', alignItems:'center', justifyContent:'center', gap:6,
+                whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
+              }}
+            >↶ Restore {selected.size} item{selected.size!==1?'s':''}</button>
+          </div>
+        )}
       </div>
     );
   }
