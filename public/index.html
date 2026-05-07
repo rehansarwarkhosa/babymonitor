@@ -2711,8 +2711,297 @@
     background:'#F7FAFC', color:'#4A5568', fontWeight:700, cursor:'pointer',
   };
 
+  /* ─── Auto-Screenshot supervisor (multi-device, custom interval) ──
+     Same shape as AutoRecordCard but the user picks an INTERVAL (how often
+     to snap), not a duration. The server fires `take_screenshot` every
+     `intervalMs` to each enabled, online device — forever, until stopped.
+     Interval can be entered in seconds OR minutes via a unit toggle, plus
+     quick-pick chips for common values. Custom input uses the Android
+     numeric keyboard (type=number + inputMode=numeric + pattern=\d*). */
+  const SHOT_PRESETS_SEC = [5, 10, 15, 30];
+  const SHOT_PRESETS_MIN = [1, 2, 5, 10, 30];
+
+  function AutoShotCard({ devices, autoShot, onToast, onRefresh }) {
+    const devList = useMemo(() => Object.values(devices || {}), [devices]);
+    const jobs = autoShot?.jobs || {};
+
+    const [selected, setSelected] = useState(() => new Set(Object.keys(jobs)));
+    useEffect(() => { setSelected(new Set(Object.keys(jobs))); /* eslint-disable-line */ }, [Object.keys(jobs).join('|')]);
+
+    // Unit + numeric value. Default 5 seconds.
+    // If something is already enabled, mirror its interval back into the picker.
+    const initial = (() => {
+      const first = Object.values(jobs)[0];
+      const ms = first?.intervalMs || 5000;
+      if (ms % 60000 === 0 && ms >= 60000) return { unit:'min', value: ms / 60000 };
+      return { unit:'sec', value: Math.max(2, Math.round(ms / 1000)) };
+    })();
+    const [unit,  setUnit]  = useState(initial.unit);  // 'sec' | 'min'
+    const [value, setValue] = useState(String(initial.value));
+    const [busy,  setBusy]  = useState(false);
+
+    const numValue = parseInt(value, 10);
+    const intervalMs = (Number.isFinite(numValue) && numValue > 0)
+      ? numValue * (unit === 'min' ? 60000 : 1000)
+      : 0;
+    const valid = intervalMs >= 2000;
+
+    const toggle = (id) => setSelected(p => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+    const selectAll  = () => setSelected(new Set(devList.map(d => d.deviceId)));
+    const selectNone = () => setSelected(new Set());
+
+    const start = async () => {
+      const ids = Array.from(selected);
+      if (ids.length === 0) { onToast('Pick at least one device', 'warn'); return; }
+      if (!valid)            { onToast('Minimum interval is 2 seconds', 'warn'); return; }
+      setBusy(true);
+      try {
+        const r = await fetch('/api/auto-screenshot/start', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ deviceIds: ids, intervalMs }),
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok) { onToast(d.error || 'Failed to start auto-screenshot', 'error'); setBusy(false); return; }
+        onToast(
+          `Auto-screenshot on for ${ids.length} device${ids.length===1?'':'s'} · every ${value} ${unit}`,
+          'info'
+        );
+        onRefresh && onRefresh();
+      } catch { onToast('Network error', 'error'); }
+      setBusy(false);
+    };
+
+    const stop = async ({ all = false } = {}) => {
+      const ids = all ? [] : Array.from(selected);
+      if (!all && ids.length === 0) { onToast('Pick devices to stop, or use Stop All', 'warn'); return; }
+      setBusy(true);
+      try {
+        const r = await fetch('/api/auto-screenshot/stop', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ deviceIds: ids }),
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok) { onToast(d.error || 'Failed to stop', 'error'); setBusy(false); return; }
+        onToast(`Stopped ${d.removed} auto-screenshot job${d.removed===1?'':'s'}`, 'info');
+        onRefresh && onRefresh();
+      } catch { onToast('Network error', 'error'); }
+      setBusy(false);
+    };
+
+    const fmtInterval = (ms) => {
+      if (ms >= 60000 && ms % 60000 === 0) return `${ms/60000} min`;
+      if (ms >= 60000) return `${(ms/60000).toFixed(1)} min`;
+      return `${(ms/1000).toFixed(0)} sec`;
+    };
+
+    const renderStatus = (devId) => {
+      const j = jobs[devId];
+      if (!j) return <span style={{fontSize:10, color:'#A0AEC0'}}>off</span>;
+      const dev = devices[devId];
+      let text = '◌ scheduled', bg = '#C6F6D5', fg = '#22543D';
+      if (!dev?.isOnline) { text = '⏸ waiting (offline)'; bg = '#FEFCBF'; fg = '#975A16'; }
+      else if (j.lastStatus === 'fired') { text = `📷 sent ${j.sentCount||0}`; bg = '#E9D8FD'; fg = '#553C9A'; }
+      return (
+        <span style={{
+          fontSize:10, fontWeight:700, padding:'2px 7px', borderRadius:10,
+          background: bg, color: fg, whiteSpace:'nowrap',
+        }}>{text}</span>
+      );
+    };
+
+    const presets = unit === 'min' ? SHOT_PRESETS_MIN : SHOT_PRESETS_SEC;
+
+    return (
+      <div style={{
+        background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
+        boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+      }}>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6, gap:10, flexWrap:'wrap'}}>
+          <div style={{fontSize:16, fontWeight:700, color:'#2D3748'}}>
+            📷 Auto-Screenshot (Always On)
+          </div>
+          {Object.keys(jobs).length > 0 && (
+            <span style={{
+              fontSize:10, fontWeight:700, padding:'3px 8px', borderRadius:10,
+              background:'#E9D8FD', color:'#553C9A',
+            }}>● {Object.keys(jobs).length} active</span>
+          )}
+        </div>
+        <div style={{fontSize:12, color:'#718096', marginBottom:14, lineHeight:1.45}}>
+          Pick devices and an interval. The server snaps a screenshot every interval
+          while the device is online — forever, until you stop it. Survives restarts.
+        </div>
+
+        {devList.length === 0 ? (
+          <div style={{fontSize:13, color:'#A0AEC0', textAlign:'center', padding:'18px 0'}}>
+            No devices known yet. Connect a device first.
+          </div>
+        ) : (
+          <>
+            {/* Quick selection */}
+            <div style={{display:'flex', gap:8, marginBottom:8, fontSize:11}}>
+              <button onClick={selectAll}  style={quickBtn}>Select all</button>
+              <button onClick={selectNone} style={quickBtn}>Clear</button>
+              <span style={{marginLeft:'auto', alignSelf:'center', color:'#A0AEC0'}}>
+                {selected.size}/{devList.length} selected
+              </span>
+            </div>
+
+            {/* Device list */}
+            <div style={{
+              border:'1px solid #E2E8F0', borderRadius:10, overflow:'hidden', marginBottom:14,
+            }}>
+              {devList.map((d, i) => {
+                const checked = selected.has(d.deviceId);
+                const job = jobs[d.deviceId];
+                return (
+                  <label
+                    key={d.deviceId}
+                    style={{
+                      display:'flex', alignItems:'center', gap:10,
+                      padding:'10px 12px', cursor:'pointer', boxSizing:'border-box',
+                      background: checked ? '#FAF5FF' : '#FFF',
+                      borderTop: i === 0 ? 'none' : '1px solid #EDF2F7',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(d.deviceId)}
+                      style={{width:18, height:18, cursor:'pointer', flexShrink:0, accentColor:'#7B68AE'}}
+                    />
+                    <Dot online={d.isOnline} recording={d.isRecording} />
+                    <div style={{flex:1, minWidth:0}}>
+                      <div style={{
+                        fontSize:13, fontWeight:600, color:'#2D3748',
+                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                      }}>{d.deviceName || d.deviceId}</div>
+                      <div style={{fontSize:10, color:'#A0AEC0', marginTop:1}}>
+                        {d.isOnline ? 'online' : 'offline'}
+                        {job ? ` · every ${fmtInterval(job.intervalMs)}` : ''}
+                      </div>
+                    </div>
+                    {renderStatus(d.deviceId)}
+                  </label>
+                );
+              })}
+            </div>
+
+            {/* Unit toggle */}
+            <div style={{fontSize:12, color:'#718096', marginBottom:6}}>
+              Take a screenshot every…
+            </div>
+            <div style={{display:'flex', gap:6, marginBottom:8}}>
+              <button
+                onClick={()=>setUnit('sec')}
+                style={{
+                  flex:1, height:38, borderRadius:9, fontSize:13, fontWeight:700, cursor:'pointer',
+                  border: `1.5px solid ${unit==='sec' ? '#7B68AE' : '#E2E8F0'}`,
+                  background: unit==='sec' ? '#7B68AE' : '#F7FAFC',
+                  color: unit==='sec' ? '#FFF' : '#4A5568',
+                }}
+              >Seconds</button>
+              <button
+                onClick={()=>setUnit('min')}
+                style={{
+                  flex:1, height:38, borderRadius:9, fontSize:13, fontWeight:700, cursor:'pointer',
+                  border: `1.5px solid ${unit==='min' ? '#7B68AE' : '#E2E8F0'}`,
+                  background: unit==='min' ? '#7B68AE' : '#F7FAFC',
+                  color: unit==='min' ? '#FFF' : '#4A5568',
+                }}
+              >Minutes</button>
+            </div>
+
+            {/* Quick-pick chips for the active unit */}
+            <div style={{display:'flex', flexWrap:'wrap', gap:6, marginBottom:10}}>
+              {presets.map(v => {
+                const active = String(v) === value;
+                return (
+                  <button
+                    key={v}
+                    onClick={()=>setValue(String(v))}
+                    style={{
+                      flex:'1 1 calc(20% - 6px)', minWidth:54,
+                      height:38, borderRadius:8, fontSize:13, fontWeight:700, cursor:'pointer',
+                      border: `1.5px solid ${active ? '#7B68AE' : '#E2E8F0'}`,
+                      background: active ? '#7B68AE' : '#F7FAFC',
+                      color: active ? '#FFF' : '#2D3748',
+                    }}
+                  >{v}{unit==='sec'?'s':'m'}</button>
+                );
+              })}
+            </div>
+
+            {/* Custom value — Android numeric keypad */}
+            <div style={{fontSize:11, fontWeight:700, color:'#A0AEC0', marginBottom:6, letterSpacing:0.4}}>
+              OR ENTER CUSTOM ({unit === 'sec' ? 'seconds' : 'minutes'})
+            </div>
+            <input
+              type="number"
+              inputMode="numeric"
+              pattern="\d*"
+              min="1"
+              step="1"
+              autoComplete="off"
+              value={value}
+              placeholder={unit === 'sec' ? 'e.g. 7' : 'e.g. 3'}
+              onChange={e => setValue(e.target.value.replace(/\D/g, '').slice(0, 5))}
+              style={{
+                width:'100%', height:46, fontSize:16, fontWeight:600, textAlign:'center',
+                padding:'0 12px', borderRadius:10, boxSizing:'border-box',
+                border:'1.5px solid #E2E8F0', background:'#F7FAFC', color:'#2D3748',
+                outline:'none', marginBottom:10,
+              }}
+            />
+
+            {/* Live summary */}
+            <div style={{
+              padding:'8px 12px', borderRadius:8, marginBottom:12,
+              background: valid ? '#FAF5FF' : '#FFF5F5',
+              border: `1px solid ${valid ? '#E9D8FD' : '#FED7D7'}`,
+              fontSize:12, color: valid ? '#553C9A' : '#C53030',
+            }}>
+              {valid
+                ? <>One screenshot every <b>{value} {unit === 'sec' ? 'second' : 'minute'}{numValue===1?'':'s'}</b> per selected device.</>
+                : 'Minimum interval is 2 seconds'}
+            </div>
+
+            {/* Start / Stop / Stop all */}
+            <div style={{display:'flex', gap:8}}>
+              <button onClick={start} disabled={busy || selected.size===0 || !valid} style={{
+                flex:'2 1 0', minWidth:0, height:44, borderRadius:10, border:'none',
+                background: (busy || selected.size===0 || !valid) ? '#A0AEC0' : '#7B68AE',
+                color:'#FFF', fontWeight:700, fontSize:14,
+                cursor: (busy || selected.size===0 || !valid) ? 'not-allowed' : 'pointer',
+                whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
+              }}>📷 Start ({selected.size})</button>
+              <button onClick={()=>stop({ all:false })} disabled={busy || selected.size===0} style={{
+                flex:'1 1 0', minWidth:0, height:44, borderRadius:10, border:'1.5px solid #E53E3E',
+                background:'#FFF', color:'#E53E3E', fontWeight:700, fontSize:14,
+                cursor:(busy || selected.size===0) ? 'not-allowed' : 'pointer',
+                opacity: (busy || selected.size===0) ? 0.5 : 1,
+              }}>■ Stop</button>
+              {Object.keys(jobs).length > 0 && (
+                <button onClick={()=>stop({ all:true })} disabled={busy} style={{
+                  flex:'1 1 0', minWidth:0, height:44, borderRadius:10, border:'none',
+                  background:'#E53E3E', color:'#FFF', fontWeight:700, fontSize:13,
+                  cursor: busy ? 'not-allowed' : 'pointer',
+                  whiteSpace:'nowrap',
+                }}>Stop all</button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
   /* ─── Settings screen ───────────────────────────────────────── */
-  function SettingsScreen({ authCfg, onUpdated, onToast, onLogout, customDurations = [], onCustomDurationsChange, devices = {}, autoRecord = { jobs: {} }, onAutoRecordRefresh }) {
+  function SettingsScreen({ authCfg, onUpdated, onToast, onLogout, customDurations = [], onCustomDurationsChange, devices = {}, autoRecord = { jobs: {} }, onAutoRecordRefresh, autoShot = { jobs: {} }, onAutoShotRefresh }) {
     const [newDurMin, setNewDurMin] = useState('');
     const [newDurSec, setNewDurSec] = useState('');
     const presetVals = new Set(DURATIONS.map(d => d.value));
@@ -2944,6 +3233,13 @@
           onRefresh={onAutoRecordRefresh}
         />
 
+        <AutoShotCard
+          devices={devices}
+          autoShot={autoShot}
+          onToast={onToast}
+          onRefresh={onAutoShotRefresh}
+        />
+
         <div style={{
           background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
           boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
@@ -3143,6 +3439,13 @@
         if (r.ok) setAutoRecord(await r.json());
       } catch {}
     }, []);
+    const [autoShot,        setAutoShot]        = useState({ jobs: {} });
+    const fetchAutoShot = useCallback(async () => {
+      try {
+        const r = await fetch('/api/auto-screenshot');
+        if (r.ok) setAutoShot(await r.json());
+      } catch {}
+    }, []);
     const fetchFavorites = useCallback(async () => {
       try { setFavorites(await (await fetch('/api/favorites')).json()); } catch {}
     }, []);
@@ -3339,6 +3642,7 @@
       });
       socket.on('active_bursts', snap => setBursts(snap || {}));
       socket.on('auto_record_update', snap => setAutoRecord(snap || { jobs: {} }));
+      socket.on('auto_screenshot_update', snap => setAutoShot(snap || { jobs: {} }));
       socket.on('burst_error', d => showToast(`Burst error: ${d.error||'unknown'}`, 'error'));
       socket.on('recording_error', d =>
         showToast(`Recording error on ${d.deviceName||d.deviceId}: ${d.error}`, 'error')
@@ -3434,6 +3738,7 @@
       fetchStorage();
       fetchTrash();
       fetchAutoRecord();
+      fetchAutoShot();
       fetch('/api/screenshot-bursts').then(r=>r.ok?r.json():{}).then(setBursts).catch(()=>{});
       const storageInterval = setInterval(fetchStorage, 30000);
       const reconcileInterval = setInterval(() => {
@@ -3442,7 +3747,7 @@
         }).catch(()=>{});
       }, 8000);
       return () => { clearInterval(reconcileInterval); clearInterval(storageInterval); socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
-    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, fetchStorage, fetchTrash, fetchAutoRecord, showToast]);
+    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, fetchStorage, fetchTrash, fetchAutoRecord, fetchAutoShot, showToast]);
 
     /* Refresh recycle-bin index whenever any of the live data sets change.
        Each delete triggers a fetchRec/Shot/Gallery — those state updates fire
@@ -4333,6 +4638,8 @@
               devices={devices}
               autoRecord={autoRecord}
               onAutoRecordRefresh={fetchAutoRecord}
+              autoShot={autoShot}
+              onAutoShotRefresh={fetchAutoShot}
             />
           )}
         </div>

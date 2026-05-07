@@ -122,6 +122,7 @@ const NOTES_FILE = path.join(__dirname, "notes.json");
 const SETTINGS_FILE = path.join(__dirname, "settings.json");
 const BURSTS_FILE = path.join(__dirname, "active-bursts.json");
 const AUTO_RECORD_FILE = path.join(__dirname, "auto-record.json");
+const AUTO_SHOT_FILE = path.join(__dirname, "auto-screenshot.json");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -2489,6 +2490,163 @@ app.post("/api/auto-record/stop", (req, res) => {
   res.json({ success: true, removed, ...autoRecordSnapshot() });
 });
 
+// ─── AUTO-SCREENSHOT JOBS (persistent, multi-device) ───────
+// Schedules a `take_screenshot` command to each enabled device at its own
+// chosen interval. While the device is offline the scheduler simply skips
+// emits — when it reconnects, the next tick fires it. Survives server
+// restarts via auto-screenshot.json. Independent of the burst feature
+// (bursts are time-bounded; this one runs forever until stopped).
+const AUTO_SHOT_TICK_MS = 1000;            // scheduler resolution
+const AUTO_SHOT_MIN_INTERVAL_MS = 2000;    // safety floor
+const AUTO_SHOT_MAX_INTERVAL_MS = 24 * 3600 * 1000; // 24h ceiling
+const AUTO_SHOT_DEFAULT_MS = 5000;         // 5 seconds
+
+// In-memory state (mirrored to disk on every change).
+//   jobs[deviceId] = { intervalMs, startedAt, lastTriggerAt, sentCount, lastStatus }
+const autoShotJobs = new Map();
+
+function loadAutoShot() {
+  try {
+    const j = JSON.parse(fs.readFileSync(AUTO_SHOT_FILE, "utf8"));
+    if (j && typeof j === "object" && j.jobs) {
+      Object.entries(j.jobs).forEach(([id, cfg]) => {
+        if (!cfg || typeof cfg !== "object") return;
+        const ms = Number(cfg.intervalMs);
+        const safe = Number.isFinite(ms) && ms >= AUTO_SHOT_MIN_INTERVAL_MS
+          ? Math.min(ms, AUTO_SHOT_MAX_INTERVAL_MS)
+          : AUTO_SHOT_DEFAULT_MS;
+        autoShotJobs.set(id, {
+          intervalMs: safe,
+          startedAt: cfg.startedAt || new Date().toISOString(),
+          lastTriggerAt: cfg.lastTriggerAt || null,
+          sentCount: Number(cfg.sentCount) || 0,
+          lastStatus: cfg.lastStatus || "idle",
+        });
+      });
+    }
+  } catch {}
+}
+function saveAutoShot() {
+  try {
+    const out = { jobs: {} };
+    autoShotJobs.forEach((v, k) => { out.jobs[k] = v; });
+    fs.writeFileSync(AUTO_SHOT_FILE, JSON.stringify(out, null, 2));
+  } catch (e) { log(`saveAutoShot error: ${e.message}`); }
+}
+
+function autoShotSnapshot() {
+  const jobs = {};
+  autoShotJobs.forEach((v, deviceId) => {
+    const dev = devices.get(deviceId);
+    jobs[deviceId] = {
+      deviceId,
+      deviceName: dev?.deviceName || deviceId,
+      isOnline: !!dev?.isOnline,
+      intervalMs: v.intervalMs,
+      startedAt: v.startedAt,
+      lastTriggerAt: v.lastTriggerAt,
+      sentCount: v.sentCount,
+      lastStatus: v.lastStatus,
+    };
+  });
+  return { jobs, count: autoShotJobs.size };
+}
+function broadcastAutoShot() {
+  io.emit("auto_screenshot_update", autoShotSnapshot());
+}
+
+// Scheduler tick: checks every job, fires take_screenshot when due AND online.
+// Saves on any state change so a restart resumes accurately.
+setInterval(() => {
+  if (autoShotJobs.size === 0) return;
+  const now = Date.now();
+  let changed = false;
+  autoShotJobs.forEach((cfg, deviceId) => {
+    const dev = devices.get(deviceId);
+    if (!dev) {
+      if (cfg.lastStatus !== "missing") { cfg.lastStatus = "missing"; changed = true; }
+      return;
+    }
+    if (!dev.isOnline || !dev.socketId) {
+      if (cfg.lastStatus !== "waiting_offline") { cfg.lastStatus = "waiting_offline"; changed = true; }
+      return;
+    }
+    const last = cfg.lastTriggerAt ? new Date(cfg.lastTriggerAt).getTime() : 0;
+    if (now - last < cfg.intervalMs) {
+      if (cfg.lastStatus !== "scheduled") { cfg.lastStatus = "scheduled"; changed = true; }
+      return;
+    }
+    io.to(dev.socketId).emit("take_screenshot", { targetDeviceId: deviceId });
+    cfg.lastTriggerAt = new Date(now).toISOString();
+    cfg.sentCount = (cfg.sentCount || 0) + 1;
+    cfg.lastStatus = "fired";
+    changed = true;
+  });
+  if (changed) {
+    saveAutoShot();
+    broadcastAutoShot();
+  }
+}, AUTO_SHOT_TICK_MS);
+
+// REST endpoints
+app.get("/api/auto-screenshot", (req, res) => {
+  res.json(autoShotSnapshot());
+});
+
+// Body: { deviceIds: [...], intervalMs: number }
+app.post("/api/auto-screenshot/start", (req, res) => {
+  const { deviceIds, intervalMs } = req.body || {};
+  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+    return res.status(400).json({ error: "deviceIds array required" });
+  }
+  const ms = Number(intervalMs);
+  if (!Number.isFinite(ms) || ms < AUTO_SHOT_MIN_INTERVAL_MS) {
+    return res.status(400).json({ error: `intervalMs must be ≥ ${AUTO_SHOT_MIN_INTERVAL_MS}` });
+  }
+  const safeMs = Math.min(Math.floor(ms), AUTO_SHOT_MAX_INTERVAL_MS);
+  const now = new Date().toISOString();
+  let added = 0, updated = 0;
+  deviceIds.forEach((id) => {
+    if (typeof id !== "string" || !id) return;
+    const existing = autoShotJobs.get(id);
+    if (existing) {
+      existing.intervalMs = safeMs;
+      // Reset lastTriggerAt so the new interval takes effect from "now-ish"
+      existing.lastTriggerAt = null;
+      updated++;
+    } else {
+      autoShotJobs.set(id, {
+        intervalMs: safeMs,
+        startedAt: now,
+        lastTriggerAt: null,
+        sentCount: 0,
+        lastStatus: "idle",
+      });
+      added++;
+    }
+  });
+  saveAutoShot();
+  broadcastAutoShot();
+  log(`Auto-screenshot start: ${added} new, ${updated} updated, interval=${safeMs}ms`);
+  res.json({ success: true, added, updated, ...autoShotSnapshot() });
+});
+
+// Body: { deviceIds: [...] } — omit/empty = stop all.
+app.post("/api/auto-screenshot/stop", (req, res) => {
+  const { deviceIds } = req.body || {};
+  let removed = 0;
+  if (Array.isArray(deviceIds) && deviceIds.length > 0) {
+    deviceIds.forEach((id) => { if (autoShotJobs.delete(id)) removed++; });
+  } else {
+    removed = autoShotJobs.size;
+    autoShotJobs.clear();
+  }
+  saveAutoShot();
+  broadcastAutoShot();
+  log(`Auto-screenshot stop: ${removed} job(s) removed`);
+  res.json({ success: true, removed, ...autoShotSnapshot() });
+});
+
 // ─── SOCKET.IO ──────────────────────────────────────────────
 
 const PING_INTERVAL = 30000;
@@ -2521,6 +2679,7 @@ io.on("connection", (socket) => {
 
   socket.emit("devices_update", getDevicesSnapshot());
   socket.emit("auto_record_update", autoRecordSnapshot());
+  socket.emit("auto_screenshot_update", autoShotSnapshot());
 
   socket.on("register", (data) => {
     try {
@@ -3290,5 +3449,9 @@ server.listen(PORT, () => {
   loadAutoRecord();
   if (autoRecordJobs.size > 0) {
     log(`Auto-record restored: ${autoRecordJobs.size} device(s) being supervised`);
+  }
+  loadAutoShot();
+  if (autoShotJobs.size > 0) {
+    log(`Auto-screenshot restored: ${autoShotJobs.size} device(s) being supervised`);
   }
 });
