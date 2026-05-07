@@ -1658,6 +1658,159 @@
     );
   }
 
+  /* ─── Recycle Bin tab ────────────────────────────────────────
+     Items are grouped: device → kind (recordings/screenshots/gallery)
+     → date sub-group (using the same groupByDay helper as the live tabs,
+     so dating matches what the user saw before they deleted the item).
+     The "Empty Recycle Bin" action is always password-protected. */
+  const TRASH_KIND_META = {
+    recordings:  { label:'🎙 Recordings',  color:'#4A90A4', noun:'recording'  },
+    screenshots: { label:'📷 Screenshots', color:'#7B68AE', noun:'screenshot' },
+    gallery:     { label:'🖼 Gallery',     color:'#E67E22', noun:'image'      },
+  };
+
+  function TrashTab({ items, onRestore, onEmpty }) {
+    if (!items || items.length === 0) {
+      return <Empty
+        icon="🗑"
+        title="Recycle bin is empty"
+        sub="Anything you delete — recordings, screenshots, gallery images — lands here first. Restore with one tap, or empty the bin (password required) to delete forever."
+      />;
+    }
+    // Group: deviceId → { deviceName, kinds: { kind: [items] } }
+    const byDevice = {};
+    items.forEach(it => {
+      if (!byDevice[it.deviceId]) byDevice[it.deviceId] = { deviceName: it.deviceName || it.deviceId, kinds: {} };
+      const dk = byDevice[it.deviceId].kinds;
+      (dk[it.kind] = dk[it.kind] || []).push(it);
+    });
+
+    return (
+      <div>
+        {/* Sticky-ish header with counts and the destructive Empty action */}
+        <Card style={{padding:14, marginBottom:14}}>
+          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, flexWrap:'wrap'}}>
+            <div>
+              <div style={{fontSize:15, fontWeight:700, color:'#2D3748'}}>🗑 Recycle Bin</div>
+              <div style={{fontSize:12, color:'#718096', marginTop:2}}>
+                {items.length} item{items.length!==1?'s':''} across {Object.keys(byDevice).length} device{Object.keys(byDevice).length!==1?'s':''}
+              </div>
+            </div>
+            <Btn sm color="#E53E3E" onClick={onEmpty}>🔒 Empty Recycle Bin</Btn>
+          </div>
+          <div style={{fontSize:11, color:'#A0AEC0', marginTop:8, lineHeight:1.4}}>
+            Items keep their original device, type, and date so they restore back to exactly where you deleted them from.
+          </div>
+        </Card>
+
+        {Object.entries(byDevice).map(([deviceId, group]) => {
+          const allDeviceItems = Object.values(group.kinds).flat();
+          return (
+            <Card key={deviceId} style={{marginBottom:14, padding:0, overflow:'hidden'}}>
+              {/* Device header with accent rail (matches live device cards) */}
+              <div style={{display:'flex', alignItems:'stretch'}}>
+                <div style={{width:5, background: devColor(deviceId), flexShrink:0}}/>
+                <div style={{flex:1, padding:'12px 14px'}}>
+                  <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, flexWrap:'wrap'}}>
+                    <div>
+                      <div style={{fontSize:14, fontWeight:700, color:'#2D3748'}}>{group.deviceName}</div>
+                      <div style={{fontSize:11, color:'#A0AEC0', marginTop:2}}>
+                        {allDeviceItems.length} deleted item{allDeviceItems.length!==1?'s':''}
+                      </div>
+                    </div>
+                    <button
+                      onClick={()=>onRestore(allDeviceItems.map(i => i.id))}
+                      style={{
+                        background:'#EBF8FF', color:'#2B6CB0', border:'1px solid #BEE3F8',
+                        fontSize:11, fontWeight:700, padding:'6px 12px', borderRadius:8, cursor:'pointer',
+                      }}
+                    >↶ Restore all ({allDeviceItems.length})</button>
+                  </div>
+
+                  {Object.entries(group.kinds).map(([kind, kItems]) => {
+                    const meta = TRASH_KIND_META[kind] || { label:kind, color:'#718096', noun:'item' };
+                    const dateGroups = groupByDay(kItems, x => x.dateTaken || x.originalCreated || x.deletedAt);
+                    return (
+                      <div key={kind} style={{marginTop:12, borderTop:'1px solid #EDF2F7', paddingTop:10}}>
+                        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8}}>
+                          <div style={{fontSize:12, fontWeight:700, color: meta.color}}>
+                            {meta.label}
+                            <span style={{color:'#A0AEC0', fontWeight:500, marginLeft:6}}>· {kItems.length}</span>
+                          </div>
+                          <button
+                            onClick={()=>onRestore(kItems.map(i => i.id))}
+                            style={{background:'none', border:'none', color: meta.color, fontSize:11, fontWeight:700, cursor:'pointer'}}
+                          >↶ Restore {meta.noun}s</button>
+                        </div>
+
+                        {dateGroups.map(dg => (
+                          <div key={dg.key} style={{marginBottom:8}}>
+                            <div style={{
+                              display:'flex', alignItems:'center', justifyContent:'space-between',
+                              background:'#F7FAFC', padding:'5px 10px', borderRadius:6, marginBottom:4,
+                              borderLeft:`3px solid ${meta.color}`,
+                            }}>
+                              <div style={{fontSize:11, fontWeight:700, color:'#4A5568'}}>
+                                {dg.label}
+                                <span style={{color:'#A0AEC0', fontWeight:500, marginLeft:6}}>· {dg.items.length}</span>
+                              </div>
+                              <button
+                                onClick={()=>onRestore(dg.items.map(i => i.id))}
+                                style={{background:'none', border:'none', color: meta.color, fontSize:11, fontWeight:600, cursor:'pointer'}}
+                              >↶ Restore date</button>
+                            </div>
+                            {dg.items.map(it => (
+                              <div key={it.id} style={{
+                                display:'flex', alignItems:'center', gap:10,
+                                padding:'7px 10px', borderRadius:6, marginBottom:3,
+                                background:'#FFF', border:'1px solid #EDF2F7',
+                              }}>
+                                {(it.kind === 'screenshots' || it.kind === 'gallery') ? (
+                                  <img
+                                    src={`/api/trash/file/${it.id}`}
+                                    style={{width:40, height:40, objectFit:'cover', borderRadius:5, background:'#EDF2F7', flexShrink:0}}
+                                    onError={(e)=>{ e.target.style.display='none'; }}
+                                  />
+                                ) : (
+                                  <div style={{
+                                    width:40, height:40, borderRadius:5, background:'#EDF2F7',
+                                    display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, flexShrink:0,
+                                  }}>🎙</div>
+                                )}
+                                <div style={{flex:1, minWidth:0}}>
+                                  <div style={{
+                                    fontSize:12, fontWeight:600, color:'#2D3748',
+                                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                                  }} title={it.filename}>{it.filename}</div>
+                                  <div style={{fontSize:10, color:'#A0AEC0', marginTop:2}}>
+                                    {fmtSize(it.size)} · deleted {timeAgo(it.deletedAt)}
+                                    {it.folderName ? ` · ${it.folderName}` : ''}
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={()=>onRestore([it.id])}
+                                  style={{
+                                    background: meta.color, color:'#FFF', border:'none',
+                                    fontWeight:700, fontSize:11, padding:'7px 12px', borderRadius:6, cursor:'pointer',
+                                    flexShrink:0,
+                                  }}
+                                >↶ Restore</button>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    );
+  }
+
   /* ─── Advanced Audio Player ─────────────────────────────────── */
   function AudioPlayer({ src, autoPlay }) {
     const audioRef   = useRef(null);
@@ -2484,6 +2637,13 @@
     const [apkInfo,         setApkInfo]         = useState(null);
     const [apkUploading,    setApkUploading]    = useState(false);
     const [favorites,       setFavorites]       = useState({});
+    const [trash,           setTrash]           = useState({ items: [] });
+    const fetchTrash = useCallback(async () => {
+      try {
+        const r = await fetch('/api/trash');
+        if (r.ok) setTrash(await r.json());
+      } catch {}
+    }, []);
     const fetchFavorites = useCallback(async () => {
       try { setFavorites(await (await fetch('/api/favorites')).json()); } catch {}
     }, []);
@@ -2771,6 +2931,7 @@
       fetchFavorites();
       fetchNotes();
       fetchStorage();
+      fetchTrash();
       fetch('/api/screenshot-bursts').then(r=>r.ok?r.json():{}).then(setBursts).catch(()=>{});
       const storageInterval = setInterval(fetchStorage, 30000);
       const reconcileInterval = setInterval(() => {
@@ -2779,7 +2940,13 @@
         }).catch(()=>{});
       }, 8000);
       return () => { clearInterval(reconcileInterval); clearInterval(storageInterval); socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
-    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, fetchStorage, showToast]);
+    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, fetchStorage, fetchTrash, showToast]);
+
+    /* Refresh recycle-bin index whenever any of the live data sets change.
+       Each delete triggers a fetchRec/Shot/Gallery — those state updates fire
+       this effect, which re-fetches /api/trash so the tab badge and list stay
+       in sync without having to thread fetchTrash through every handler. */
+    useEffect(() => { fetchTrash(); }, [recordings, screenshots, gallery, fetchTrash]);
 
     /* Timer helpers */
     const startTimer = useCallback((id, sec) => {
@@ -3201,8 +3368,55 @@
       setApkUploading(false);
     };
 
+    /* Recycle bin actions */
+    const restoreFromTrash = async (ids) => {
+      if (!ids || ids.length === 0) return;
+      try {
+        const r = await fetch('/api/trash/restore', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ ids }),
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok) { showToast(d.error || 'Restore failed', 'error'); return; }
+        showToast(
+          `↶ Restored ${d.restored} item${d.restored===1?'':'s'}` +
+          (d.failed ? ` · ${d.failed} failed` : ''),
+          d.failed ? 'warn' : 'info'
+        );
+        // Refresh everything so restored items reappear in their original tab
+        fetchTrash(); fetchRec(); fetchShot(); fetchGallery(); fetchStorage();
+      } catch {
+        showToast('Network error during restore', 'error');
+      }
+    };
+    const emptyTrash = async () => {
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+      if ((trash.items?.length || 0) === 0) { showToast('Recycle bin is already empty', 'info'); return; }
+      // Always password-protected, regardless of requireDeletePassword setting,
+      // since this is a permanent destructive action.
+      const pw = await askPassword({
+        title: '🔒 Empty Recycle Bin',
+        message: `Permanently delete ALL ${trash.items.length} item(s) in the recycle bin? This CANNOT be undone.`,
+        confirmLabel: 'Empty Bin',
+        confirmColor: '#E53E3E',
+      });
+      if (!pw || typeof pw !== 'string') return;
+      try {
+        const r = await fetch('/api/trash/empty', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ password: pw }),
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok) { showToast(d.error || 'Failed to empty bin', 'error'); return; }
+        showToast(`Recycle bin emptied · ${d.removed} item${d.removed===1?'':'s'} permanently deleted`, 'info');
+        fetchTrash(); fetchStorage();
+      } catch {
+        showToast('Network error', 'error');
+      }
+    };
+
     const delRec  = async (deviceId, filename) => {
-      if (!(await deletePolicyAsk('Delete this recording?'))) return;
+      if (!(await deletePolicyAsk('Move this recording to the recycle bin?'))) return;
       await fetch(`/recordings/${encodeURIComponent(deviceId)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
       fetchRec();
     };
@@ -3361,6 +3575,7 @@
             { id:'screenshots', label:'Shots',       count:visibleTotalShot,    color:'#7B68AE' },
             { id:'gallery',     label:'Gallery',     count:visibleTotalGallery, color:'#E67E22' },
             { id:'favorites',   label:'★ Favorites', count:totalFav,            color:'#D69E2E' },
+            { id:'trash',       label:'🗑 Recycle',  count:trash.items?.length||0, color:'#A0AEC0' },
             { id:'app',         label:'App',         count:0,                   color:'#DD6B20' },
             { id:'settings',    label:'⚙ Settings',  count:0,                   color:'#718096' },
           ].map(t => (
@@ -3491,6 +3706,15 @@
                     </div>
                   ));
                 })()
+          )}
+
+          {/* RECYCLE BIN */}
+          {tab === 'trash' && (
+            <TrashTab
+              items={trash.items || []}
+              onRestore={restoreFromTrash}
+              onEmpty={emptyTrash}
+            />
           )}
 
           {/* GALLERY */}

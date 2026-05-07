@@ -114,6 +114,8 @@ const RECORDINGS_DIR = path.join(__dirname, "recordings");
 const SCREENSHOTS_DIR = path.join(__dirname, "screenshots");
 const GALLERY_DIR = path.join(__dirname, "gallery");
 const APK_DIR = path.join(__dirname, "apk");
+const TRASH_DIR = path.join(__dirname, "trash");
+const TRASH_INDEX_FILE = path.join(__dirname, "trash-index.json");
 const FAVORITES_FILE = path.join(__dirname, "favorites.json");
 const AUTH_FILE = path.join(__dirname, "auth.json");
 const NOTES_FILE = path.join(__dirname, "notes.json");
@@ -131,6 +133,9 @@ if (!fs.existsSync(GALLERY_DIR)) {
 }
 if (!fs.existsSync(APK_DIR)) {
   fs.mkdirSync(APK_DIR, { recursive: true });
+}
+if (!fs.existsSync(TRASH_DIR)) {
+  fs.mkdirSync(TRASH_DIR, { recursive: true });
 }
 
 // Middleware
@@ -285,6 +290,100 @@ const getDevicesSnapshot = () => {
 const broadcastDevices = () => {
   io.emit("devices_update", getDevicesSnapshot());
 };
+
+// ─── RECYCLE BIN (soft delete) ──────────────────────────────
+// Files removed via the UI are MOVED into ./trash/<kind>/<deviceId>/<id>__<filename>
+// and indexed in trash-index.json so they can be restored back to their original
+// location, or permanently removed via the password-protected "Empty Recycle Bin".
+const TRASH_KIND_DIRS = {
+  recordings: RECORDINGS_DIR,
+  screenshots: SCREENSHOTS_DIR,
+  gallery: GALLERY_DIR,
+};
+
+function loadTrash() {
+  try {
+    const t = JSON.parse(fs.readFileSync(TRASH_INDEX_FILE, "utf8"));
+    return Array.isArray(t) ? t : [];
+  } catch { return []; }
+}
+function saveTrash(items) {
+  try { fs.writeFileSync(TRASH_INDEX_FILE, JSON.stringify(items, null, 2)); } catch (e) { log(`saveTrash error: ${e.message}`); }
+}
+
+// Move a single live file into the trash and append a metadata entry.
+// Returns the trash entry on success, or null on failure.
+function moveToTrash({ kind, deviceId, filename, originalPath, dateTaken, folderName, deviceName }) {
+  if (!TRASH_KIND_DIRS[kind]) return null;
+  if (!filename || /[\\/]|\.\./.test(filename)) return null;
+  if (!fs.existsSync(originalPath)) return null;
+  let originalCreated = null;
+  try {
+    const st = fs.statSync(originalPath);
+    originalCreated = (st.birthtime || st.mtime || new Date()).toISOString();
+  } catch {}
+  const id = crypto.randomBytes(8).toString("hex");
+  const trashKindDir = path.join(TRASH_DIR, kind, deviceId);
+  if (!fs.existsSync(trashKindDir)) fs.mkdirSync(trashKindDir, { recursive: true });
+  const storedName = `${id}__${filename}`;
+  const trashPath = path.join(trashKindDir, storedName);
+  try {
+    fs.renameSync(originalPath, trashPath);
+  } catch (e) {
+    try {
+      fs.copyFileSync(originalPath, trashPath);
+      fs.unlinkSync(originalPath);
+    } catch (e2) {
+      log(`moveToTrash failed for ${originalPath}: ${e2.message}`);
+      return null;
+    }
+  }
+  let size = 0;
+  try { size = fs.statSync(trashPath).size; } catch {}
+  const entry = {
+    id, kind, deviceId,
+    deviceName: deviceName || (devices.get(deviceId) && devices.get(deviceId).deviceName) || deviceId,
+    filename, storedName, size,
+    deletedAt: new Date().toISOString(),
+    originalCreated,
+    dateTaken: dateTaken ? new Date(dateTaken).toISOString() : null,
+    folderName: folderName || null,
+  };
+  const items = loadTrash();
+  items.push(entry);
+  saveTrash(items);
+  return entry;
+}
+
+// Move every file in a kind/deviceId directory into the trash.
+// Used by both per-device bulk endpoints and full-device deletion.
+function moveDirToTrash(kind, deviceId) {
+  const baseDir = TRASH_KIND_DIRS[kind];
+  if (!baseDir) return 0;
+  const dir = path.join(baseDir, deviceId);
+  if (!fs.existsSync(dir)) return 0;
+  let count = 0;
+  let files = [];
+  try { files = fs.readdirSync(dir).filter(f => !f.startsWith(".")); } catch { return 0; }
+  files.forEach(f => {
+    const filePath = path.join(dir, f);
+    let meta = {};
+    if (kind === "gallery") {
+      const arr = galleryImages.get(deviceId) || [];
+      const m = arr.find(x => x.filename === f);
+      if (m) meta = { dateTaken: m.dateTaken, folderName: m.folderName };
+    }
+    const r = moveToTrash({ kind, deviceId, filename: f, originalPath: filePath, ...meta });
+    if (r) count++;
+  });
+  // Drop in-memory gallery metadata for the moved items
+  if (kind === "gallery" && galleryImages.has(deviceId)) {
+    const arr = galleryImages.get(deviceId).filter(m => fs.existsSync(path.join(dir, m.filename)));
+    if (arr.length === 0) galleryImages.delete(deviceId);
+    else galleryImages.set(deviceId, arr);
+  }
+  return count;
+}
 
 // ─── AUTHENTICATION ─────────────────────────────────────────
 
@@ -802,7 +901,7 @@ app.get("/recordings/:deviceIdOrFile/:filename?", (req, res) => {
   }
 });
 
-// Delete a recording
+// Delete a recording (soft delete → recycle bin)
 app.delete("/recordings/:deviceId/:filename", (req, res) => {
   try {
     const filePath = path.join(
@@ -813,9 +912,15 @@ app.delete("/recordings/:deviceId/:filename", (req, res) => {
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: "Recording not found" });
     }
-    fs.unlinkSync(filePath);
-    log(`Recording deleted: ${req.params.deviceId}/${req.params.filename}`);
-    return res.json({ success: true });
+    const entry = moveToTrash({
+      kind: "recordings",
+      deviceId: req.params.deviceId,
+      filename: req.params.filename,
+      originalPath: filePath,
+    });
+    if (!entry) return res.status(500).json({ error: "Failed to move to recycle bin" });
+    log(`Recording → trash: ${req.params.deviceId}/${req.params.filename}`);
+    return res.json({ success: true, trashed: true, id: entry.id });
   } catch (err) {
     log(`Delete error: ${err.message}`);
     return res.status(500).json({ error: "Failed to delete recording" });
@@ -1218,16 +1323,22 @@ app.get("/api/screenshots/image/:deviceId/:filename", (req, res) => {
   return res.sendFile(filePath);
 });
 
-// Delete screenshot
+// Delete screenshot (soft delete → recycle bin)
 app.delete("/api/screenshots/:deviceId/:filename", (req, res) => {
   try {
     const filePath = path.join(SCREENSHOTS_DIR, req.params.deviceId, req.params.filename);
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: "Screenshot not found" });
     }
-    fs.unlinkSync(filePath);
-    log(`Screenshot deleted: ${req.params.deviceId}/${req.params.filename}`);
-    return res.json({ success: true });
+    const entry = moveToTrash({
+      kind: "screenshots",
+      deviceId: req.params.deviceId,
+      filename: req.params.filename,
+      originalPath: filePath,
+    });
+    if (!entry) return res.status(500).json({ error: "Failed to move to recycle bin" });
+    log(`Screenshot → trash: ${req.params.deviceId}/${req.params.filename}`);
+    return res.json({ success: true, trashed: true, id: entry.id });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete screenshot" });
   }
@@ -1680,22 +1791,31 @@ app.get("/api/gallery/:deviceId", (req, res) => {
   }
 });
 
-// Delete a gallery image
+// Delete a gallery image (soft delete → recycle bin, preserves dateTaken/folderName)
 app.delete("/api/gallery/:deviceId/:filename", (req, res) => {
   try {
     const filePath = path.join(GALLERY_DIR, req.params.deviceId, req.params.filename);
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: "Gallery image not found" });
     }
-    fs.unlinkSync(filePath);
-    // Remove from in-memory store
+    const meta = (galleryImages.get(req.params.deviceId) || []).find(m => m.filename === req.params.filename);
+    const entry = moveToTrash({
+      kind: "gallery",
+      deviceId: req.params.deviceId,
+      filename: req.params.filename,
+      originalPath: filePath,
+      dateTaken: meta?.dateTaken,
+      folderName: meta?.folderName,
+      deviceName: meta?.deviceName,
+    });
+    if (!entry) return res.status(500).json({ error: "Failed to move to recycle bin" });
     if (galleryImages.has(req.params.deviceId)) {
       const arr = galleryImages.get(req.params.deviceId);
       const idx = arr.findIndex(m => m.filename === req.params.filename);
       if (idx !== -1) arr.splice(idx, 1);
     }
-    log(`Gallery image deleted: ${req.params.deviceId}/${req.params.filename}`);
-    return res.json({ success: true });
+    log(`Gallery image → trash: ${req.params.deviceId}/${req.params.filename}`);
+    return res.json({ success: true, trashed: true, id: entry.id });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete gallery image" });
   }
@@ -1812,28 +1932,14 @@ app.post("/api/devices/:deviceId/gallery/upload", (req, res) => {
   }
 });
 
-// ─── BULK DELETE per device ──────────────────────────────
-
-// Helper to delete all files in a directory
-function deleteAllInDir(dir) {
-  if (!fs.existsSync(dir)) return 0;
-  let count = 0;
-  try {
-    const files = fs.readdirSync(dir).filter(f => !f.startsWith("."));
-    files.forEach(f => {
-      try { fs.unlinkSync(path.join(dir, f)); count++; } catch (e) {}
-    });
-  } catch (e) {}
-  return count;
-}
+// ─── BULK DELETE per device (soft → recycle bin) ──────────
 
 // Delete all recordings for a device
 app.delete("/api/recordings/:deviceId", (req, res) => {
   try {
-    const dir = path.join(RECORDINGS_DIR, req.params.deviceId);
-    const count = deleteAllInDir(dir);
-    log(`Deleted all recordings for ${req.params.deviceId}: ${count} files`);
-    return res.json({ success: true, deleted: count });
+    const count = moveDirToTrash("recordings", req.params.deviceId);
+    log(`Recordings → trash for ${req.params.deviceId}: ${count} files`);
+    return res.json({ success: true, deleted: count, trashed: true });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete recordings" });
   }
@@ -1842,10 +1948,9 @@ app.delete("/api/recordings/:deviceId", (req, res) => {
 // Delete all screenshots for a device
 app.delete("/api/screenshots/:deviceId", (req, res) => {
   try {
-    const dir = path.join(SCREENSHOTS_DIR, req.params.deviceId);
-    const count = deleteAllInDir(dir);
-    log(`Deleted all screenshots for ${req.params.deviceId}: ${count} files`);
-    return res.json({ success: true, deleted: count });
+    const count = moveDirToTrash("screenshots", req.params.deviceId);
+    log(`Screenshots → trash for ${req.params.deviceId}: ${count} files`);
+    return res.json({ success: true, deleted: count, trashed: true });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete screenshots" });
   }
@@ -1854,11 +1959,9 @@ app.delete("/api/screenshots/:deviceId", (req, res) => {
 // Delete all gallery images for a device
 app.delete("/api/gallery/:deviceId", (req, res) => {
   try {
-    const dir = path.join(GALLERY_DIR, req.params.deviceId);
-    const count = deleteAllInDir(dir);
-    galleryImages.delete(req.params.deviceId);
-    log(`Deleted all gallery images for ${req.params.deviceId}: ${count} files`);
-    return res.json({ success: true, deleted: count });
+    const count = moveDirToTrash("gallery", req.params.deviceId);
+    log(`Gallery → trash for ${req.params.deviceId}: ${count} files`);
+    return res.json({ success: true, deleted: count, trashed: true });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete gallery images" });
   }
@@ -1932,33 +2035,20 @@ app.delete("/api/devices/:deviceId", (req, res) => {
     return res.status(400).json({ error: "Cannot delete an online device" });
   }
 
-  // Delete all device data: recordings, screenshots, gallery
-  const dirsToDelete = [
-    path.join(RECORDINGS_DIR, deviceId),
-    path.join(SCREENSHOTS_DIR, deviceId),
-    path.join(GALLERY_DIR, deviceId),
-  ];
+  // Move all device data into the recycle bin (soft delete).
+  // The empty per-kind directory is then removed.
   let deletedFiles = 0;
-  for (const dir of dirsToDelete) {
-    if (fs.existsSync(dir)) {
-      try {
-        const files = fs.readdirSync(dir);
-        files.forEach(f => {
-          try { fs.unlinkSync(path.join(dir, f)); deletedFiles++; } catch (e) {}
-        });
-        fs.rmdirSync(dir);
-      } catch (e) {
-        log(`Error cleaning up ${dir}: ${e.message}`);
-      }
-    }
-  }
-  // Clean in-memory gallery metadata
+  ["recordings", "screenshots", "gallery"].forEach(kind => {
+    deletedFiles += moveDirToTrash(kind, deviceId);
+    const dir = path.join(TRASH_KIND_DIRS[kind], deviceId);
+    try { if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}
+  });
   galleryImages.delete(deviceId);
 
   devices.delete(deviceId);
-  log(`Device removed with all data (${deletedFiles} files): ${dev.deviceName} (${deviceId})`);
+  log(`Device removed (data → trash, ${deletedFiles} files): ${dev.deviceName} (${deviceId})`);
   broadcastDevices();
-  return res.json({ success: true, deletedFiles });
+  return res.json({ success: true, deletedFiles, trashed: true });
 });
 
 // ─── FAVORITES (server-side, shared across all browsers) ────
@@ -2050,6 +2140,121 @@ app.delete("/api/favorites", (req, res) => {
   }
   saveFavorites(favs);
   res.json({ success: true });
+});
+
+// ─── RECYCLE BIN endpoints ─────────────────────────────────
+
+// List trash items (newest first). Frontend groups them by device + kind + date.
+app.get("/api/trash", (req, res) => {
+  const items = loadTrash().slice().sort((a, b) =>
+    new Date(b.deletedAt) - new Date(a.deletedAt)
+  );
+  res.json({ items, count: items.length });
+});
+
+// Stream a trashed file (used for thumbnails and previews in the recycle bin UI)
+app.get("/api/trash/file/:id", (req, res) => {
+  if (!/^[a-f0-9]{16}$/.test(req.params.id)) return res.status(400).end();
+  const items = loadTrash();
+  const it = items.find(x => x.id === req.params.id);
+  if (!it) return res.status(404).json({ error: "Not in trash" });
+  const p = path.join(TRASH_DIR, it.kind, it.deviceId, it.storedName);
+  if (!fs.existsSync(p)) return res.status(404).json({ error: "File missing" });
+  return res.sendFile(p);
+});
+
+// Restore one or more trash items back to their original kind/device folder.
+// If the destination filename collides, the restored copy gets a "_restored_<ts>" suffix.
+app.post("/api/trash/restore", (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: "ids array required" });
+  }
+  const items = loadTrash();
+  const targetIds = new Set(ids);
+  const remaining = [];
+  let restored = 0, failed = 0;
+  items.forEach(it => {
+    if (!targetIds.has(it.id)) { remaining.push(it); return; }
+    const trashPath = path.join(TRASH_DIR, it.kind, it.deviceId, it.storedName);
+    const baseDir = TRASH_KIND_DIRS[it.kind];
+    if (!baseDir || !fs.existsSync(trashPath)) {
+      failed++; remaining.push(it); return;
+    }
+    const targetDir = path.join(baseDir, it.deviceId);
+    try { if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true }); } catch {}
+    let restoreName = it.filename;
+    let target = path.join(targetDir, restoreName);
+    if (fs.existsSync(target)) {
+      const ext = path.extname(restoreName);
+      const base = path.basename(restoreName, ext);
+      restoreName = `${base}_restored_${Date.now()}${ext}`;
+      target = path.join(targetDir, restoreName);
+    }
+    try {
+      fs.renameSync(trashPath, target);
+    } catch (e) {
+      try {
+        fs.copyFileSync(trashPath, target);
+        fs.unlinkSync(trashPath);
+      } catch (e2) {
+        log(`Restore failed for ${it.id}: ${e2.message}`);
+        failed++; remaining.push(it); return;
+      }
+    }
+    // Re-seed in-memory gallery metadata so the dateTaken / folder grouping
+    // matches the original upload after restore.
+    if (it.kind === "gallery") {
+      if (!galleryImages.has(it.deviceId)) galleryImages.set(it.deviceId, []);
+      const arr = galleryImages.get(it.deviceId);
+      if (!arr.find(m => m.filename === restoreName)) {
+        arr.push({
+          deviceId: it.deviceId,
+          deviceName: it.deviceName,
+          filename: restoreName,
+          originalName: it.filename,
+          folderName: it.folderName || "Unknown",
+          dateTaken: it.dateTaken ? new Date(it.dateTaken) : new Date(),
+          size: it.size,
+          uploadedAt: new Date(),
+        });
+      }
+    }
+    restored++;
+  });
+  saveTrash(remaining);
+  log(`Trash restore: ${restored} restored, ${failed} failed`);
+  res.json({ success: true, restored, failed });
+});
+
+// Permanently empty the recycle bin. Password (same one used everywhere — default 2412)
+// is required and verified against the auth hash before anything is removed.
+app.post("/api/trash/empty", (req, res) => {
+  const { password } = req.body || {};
+  const a = loadAuth();
+  if (hashPassword(password || "") !== a.passwordHash) {
+    return res.status(401).json({ error: "Incorrect password" });
+  }
+  const items = loadTrash();
+  let removed = 0;
+  items.forEach(it => {
+    const p = path.join(TRASH_DIR, it.kind, it.deviceId, it.storedName);
+    try { if (fs.existsSync(p)) { fs.unlinkSync(p); removed++; } } catch {}
+  });
+  saveTrash([]);
+  // Remove now-empty per-device folders inside trash.
+  ["recordings", "screenshots", "gallery"].forEach(kind => {
+    const kd = path.join(TRASH_DIR, kind);
+    if (!fs.existsSync(kd)) return;
+    try {
+      fs.readdirSync(kd).forEach(d => {
+        const dd = path.join(kd, d);
+        try { if (fs.statSync(dd).isDirectory() && fs.readdirSync(dd).length === 0) fs.rmdirSync(dd); } catch {}
+      });
+    } catch {}
+  });
+  log(`Recycle bin emptied: ${removed} files permanently removed`);
+  res.json({ success: true, removed });
 });
 
 // ─── APK MANAGEMENT ────────────────────────────────────────
