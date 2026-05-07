@@ -364,6 +364,146 @@
     );
   }
 
+  /* ─── Burst Duration Modal ──────────────────────────────────
+     Independent minute picker for the screenshot-burst button.
+     Mobile-friendly: preset chips for one-tap selection plus a custom
+     numeric input that triggers Android's number keypad (inputMode="numeric"
+     + pattern="\d*"). Pressing Enter or OK starts the burst immediately. */
+  const BURST_PRESETS = [1, 2, 5, 10, 15, 30, 60];
+
+  function BurstDurationModal({ prompt }) {
+    // `selected` is the currently-chosen preset (number) or null when typing custom.
+    // `custom` is the raw textbox value; if non-empty it overrides the preset.
+    const [selected, setSelected] = useState(5);
+    const [custom, setCustom]     = useState('');
+    const inputRef = useRef(null);
+
+    useEffect(() => {
+      if (prompt) { setSelected(5); setCustom(''); }
+    }, [prompt]);
+
+    if (!prompt) return null;
+
+    // Effective minutes: typed value wins, falls back to selected preset.
+    const customNum = parseInt(custom, 10);
+    const effectiveMin = (custom !== '' && Number.isFinite(customNum) && customNum > 0)
+      ? customNum
+      : selected;
+    const valid = Number.isFinite(effectiveMin) && effectiveMin >= 1;
+
+    const submit = () => {
+      if (!valid) return;
+      prompt.onOk(effectiveMin);
+    };
+    const cancel = () => prompt.onCancel();
+
+    return (
+      <div onClick={cancel} style={{
+        position:'fixed', inset:0, zIndex:800, background:'rgba(0,0,0,0.65)',
+        display:'flex', alignItems:'center', justifyContent:'center', padding:16,
+      }}>
+        <div onClick={e=>e.stopPropagation()} style={{
+          background:'#FFF', borderRadius:14, padding:20, maxWidth:360, width:'100%',
+          boxShadow:'0 10px 30px rgba(0,0,0,0.3)',
+          maxHeight:'90vh', overflowY:'auto', boxSizing:'border-box',
+        }}>
+          <div style={{fontSize:16, fontWeight:700, color:'#2D3748', marginBottom:4}}>
+            🔥 Screenshot Burst
+          </div>
+          <div style={{fontSize:12, color:'#718096', marginBottom:14, lineHeight:1.4}}>
+            {prompt.deviceName ? <>On <b>{prompt.deviceName}</b> · </> : null}
+            One screenshot every 5 seconds for the chosen duration.
+          </div>
+
+          {/* Preset chips — tap to select */}
+          <div style={{fontSize:11, fontWeight:700, color:'#A0AEC0', marginBottom:6, letterSpacing:0.4}}>
+            QUICK PICK (MINUTES)
+          </div>
+          <div style={{display:'flex', flexWrap:'wrap', gap:6, marginBottom:14}}>
+            {BURST_PRESETS.map(m => {
+              const isActive = custom === '' && selected === m;
+              return (
+                <button
+                  key={m}
+                  onClick={() => { setCustom(''); setSelected(m); }}
+                  style={{
+                    flex:'1 1 calc(25% - 6px)', minWidth:60,
+                    height:42, borderRadius:9, fontSize:14, fontWeight:700,
+                    border: `1.5px solid ${isActive ? '#D69E2E' : '#E2E8F0'}`,
+                    background: isActive ? '#D69E2E' : '#F7FAFC',
+                    color:      isActive ? '#FFF'    : '#2D3748',
+                    cursor:'pointer', transition:'all .12s',
+                  }}
+                >{m}m</button>
+              );
+            })}
+          </div>
+
+          {/* Custom numeric input — Android numeric keypad */}
+          <div style={{fontSize:11, fontWeight:700, color:'#A0AEC0', marginBottom:6, letterSpacing:0.4}}>
+            OR ENTER MINUTES
+          </div>
+          <input
+            ref={inputRef}
+            type="number"
+            inputMode="numeric"
+            pattern="\d*"
+            min="1"
+            step="1"
+            autoComplete="off"
+            value={custom}
+            placeholder="e.g. 7"
+            onChange={e => {
+              // Strip everything but digits so the keypad never accepts a
+              // decimal/sign; an empty string falls back to the selected preset.
+              const v = e.target.value.replace(/\D/g, '').slice(0, 4);
+              setCustom(v);
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); submit(); }
+              if (e.key === 'Escape') cancel();
+            }}
+            style={{
+              width:'100%', height:48, fontSize:18, fontWeight:600, textAlign:'center',
+              padding:'0 14px', borderRadius:10, boxSizing:'border-box',
+              border: `1.5px solid ${custom !== '' ? '#D69E2E' : '#E2E8F0'}`,
+              background: '#F7FAFC', color:'#2D3748',
+              outline:'none',
+            }}
+          />
+
+          {/* Live preview of what will actually start */}
+          <div style={{
+            marginTop:12, padding:'8px 12px', borderRadius:8,
+            background: valid ? '#FFFAF0' : '#FFF5F5',
+            border: `1px solid ${valid ? '#FAD9A6' : '#FED7D7'}`,
+            fontSize:12, color: valid ? '#7B5A1B' : '#C53030',
+          }}>
+            {valid
+              ? <>Will run for <b>{effectiveMin} minute{effectiveMin===1?'':'s'}</b> · ~{Math.max(1, Math.floor((effectiveMin*60)/5))} screenshots</>
+              : 'Enter at least 1 minute'}
+          </div>
+          <div style={{fontSize:10, color:'#A0AEC0', marginTop:6, lineHeight:1.4}}>
+            Runs on the server — closing this tab won't stop it.
+          </div>
+
+          <div style={{display:'flex', gap:10, marginTop:14}}>
+            <button onClick={cancel} style={{
+              flex:1, height:44, borderRadius:10, border:'1.5px solid #E2E8F0',
+              background:'#FFF', color:'#4A5568', fontWeight:600, fontSize:14, cursor:'pointer',
+            }}>Cancel</button>
+            <button onClick={submit} disabled={!valid} style={{
+              flex:1, height:44, borderRadius:10, border:'none',
+              background: !valid ? '#A0AEC0' : '#D69E2E',
+              color:'#FFF', fontWeight:700, fontSize:14,
+              cursor: !valid ? 'not-allowed' : 'pointer',
+            }}>🔥 Start Burst</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   /* ─── Atom: Card ────────────────────────────────────────────── */
   function Card({children, accent, style:extra={}}) {
     return (
@@ -655,7 +795,7 @@
             {aBtn({color:'#7B68AE', onClick:()=>onScreenshot(dev.deviceId), disabled:capturing, title: capturing?'Capturing…':'Take screenshot', children: capturing?'⏳':'📷'})}
             {burstStatus?.active
               ? aBtn({color:'#E53E3E', primary:true, onClick:()=>onBurstStop && onBurstStop(dev.deviceId), title:'Stop screenshot burst', children:'■🔥'})
-              : aBtn({color:'#D69E2E', onClick:()=>onBurstStart && onBurstStart(dev.deviceId), title:'Burst screenshots — uses common duration below', children:'🔥'})
+              : aBtn({color:'#D69E2E', onClick:()=>onBurstStart && onBurstStart(dev.deviceId), title:'Burst screenshots — pick duration', children:'🔥'})
             }
             {aBtn({color:'#718096', onClick:()=>setAudioOpen(!audioOpen), title: audioOpen?'Hide audio panel':'Audio source', children: audioOpen?'🎤▲':'🎤'})}
             {aBtn({color:'#E67E22', onClick:()=>onGetGalleryStats(dev.deviceId), title:'Gallery', children:'🖼'})}
@@ -2695,6 +2835,7 @@
     };
     const noteFor = (kind, deviceId, filename) => notes[kind]?.[deviceId]?.[filename] || '';
     const [passPrompt, setPassPrompt] = useState(null);
+    const [burstPrompt, setBurstPrompt] = useState(null);
     // Resolves to the verified password string on success, or null on cancel.
     // Truthy-check (`if (await askPassword(...))`) still works for existing callers.
     const askPassword = (opts) => new Promise(resolve => {
@@ -3003,19 +3144,22 @@
       socketRef.current.emit('take_screenshot', { targetDeviceId:id });
     };
 
+    // Burst has its own dedicated minute picker (independent of the footer
+    // duration dropdown). Opens BurstDurationModal, awaits a minute count,
+    // then kicks off the server-driven burst.
+    const askBurstMinutes = (deviceName) => new Promise(resolve => {
+      setBurstPrompt({
+        deviceName,
+        onOk:     (mins) => { setBurstPrompt(null); resolve(mins); },
+        onCancel: ()     => { setBurstPrompt(null); resolve(null); },
+      });
+    });
+
     const burstStart = async (id) => {
-      const dur = duration;
-      if (!dur || dur < 15) {
-        showToast('Set a duration of at least 15 seconds first', 'warn');
-        return;
-      }
       const dev = devices[id];
-      const minLabel = formatDurationLabel(dur);
-      if (!window.confirm(
-        `Start burst on ${dev?.deviceName||id}?\n` +
-        `One screenshot every 5 seconds for ${minLabel}.\n\n` +
-        `Runs on the server — closing this tab won't stop it.`
-      )) return;
+      const mins = await askBurstMinutes(dev?.deviceName || id);
+      if (mins == null) return;
+      const dur = Math.max(15, Math.floor(mins * 60)); // server minimum is 15s
       try {
         const r = await fetch(`/api/devices/${encodeURIComponent(id)}/screenshot-burst`, {
           method:'POST', headers:{'Content-Type':'application/json'},
@@ -3026,7 +3170,7 @@
           showToast(j.error || 'Failed to start burst', 'error');
           return;
         }
-        showToast(`Burst started · ${minLabel}`, 'info');
+        showToast(`Burst started · ${mins} min`, 'info');
       } catch {
         showToast('Network error starting burst', 'error');
       }
@@ -3919,6 +4063,9 @@
 
         {/* ── Password modal ────────────────────────────────── */}
         <PasswordModal prompt={passPrompt} />
+
+        {/* ── Burst duration modal (independent of footer duration) ── */}
+        <BurstDurationModal prompt={burstPrompt} />
 
         {/* ── Lightbox ──────────────────────────────────────── */}
         {lightbox && (
