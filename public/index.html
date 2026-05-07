@@ -2367,8 +2367,228 @@
     );
   }
 
+  /* ─── Auto-Record supervisor (multi-device) ───────────────────
+     Lists every known device. The user picks any subset, sets a duration
+     (chunk length the server will use for each restart), then taps Start.
+     The server runs the supervisor — checks every ~3s and (re)starts a
+     recording on any selected, online, idle device. Stop applies only to
+     the current selection (or to all jobs if nothing is selected). */
+  function AutoRecordCard({ devices, autoRecord, customDurations = [], onToast, onRefresh }) {
+    const devList = useMemo(() => Object.values(devices || {}), [devices]);
+    const jobs = autoRecord?.jobs || {};
+
+    // Local selection — defaults to all currently-supervised devices so the
+    // user can quickly Stop them without manually re-checking each row.
+    const [selected, setSelected] = useState(() => new Set(Object.keys(jobs)));
+    useEffect(() => { setSelected(new Set(Object.keys(jobs))); /* eslint-disable-line */ }, [Object.keys(jobs).join('|')]);
+
+    // Duration the supervisor will request on each (re)start.
+    const [durSec, setDurSec] = useState(() => {
+      const first = Object.values(jobs)[0];
+      return first?.durationSeconds || 300;
+    });
+    const [busy, setBusy] = useState(false);
+
+    // Build the duration option list from presets + user-added custom durations.
+    const durationOpts = useMemo(() => {
+      const seen = new Set();
+      const all = [];
+      [...DURATIONS.map(d => d.value), ...customDurations].forEach(v => {
+        if (Number.isFinite(v) && v >= 15 && !seen.has(v)) { seen.add(v); all.push(v); }
+      });
+      return all.sort((a,b)=>a-b).map(v => ({ value:v, label: formatDurationLabel(v) }));
+    }, [customDurations]);
+
+    const toggle = (id) => {
+      setSelected(prev => {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id); else n.add(id);
+        return n;
+      });
+    };
+    const selectAll  = () => setSelected(new Set(devList.map(d => d.deviceId)));
+    const selectNone = () => setSelected(new Set());
+
+    const start = async () => {
+      const ids = Array.from(selected);
+      if (ids.length === 0) { onToast('Pick at least one device', 'warn'); return; }
+      setBusy(true);
+      try {
+        const r = await fetch('/api/auto-record/start', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ deviceIds: ids, durationSeconds: durSec }),
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok) { onToast(d.error || 'Failed to start auto-record', 'error'); setBusy(false); return; }
+        onToast(
+          `Auto-record on for ${ids.length} device${ids.length===1?'':'s'} · ${formatDurationLabel(durSec)} chunks`,
+          'info'
+        );
+        onRefresh && onRefresh();
+      } catch { onToast('Network error', 'error'); }
+      setBusy(false);
+    };
+
+    const stop = async ({ all = false } = {}) => {
+      const ids = all ? [] : Array.from(selected);
+      if (!all && ids.length === 0) { onToast('Pick devices to stop, or use Stop All', 'warn'); return; }
+      setBusy(true);
+      try {
+        const r = await fetch('/api/auto-record/stop', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ deviceIds: ids }),
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok) { onToast(d.error || 'Failed to stop', 'error'); setBusy(false); return; }
+        onToast(`Stopped ${d.removed} auto-record job${d.removed===1?'':'s'}`, 'info');
+        onRefresh && onRefresh();
+      } catch { onToast('Network error', 'error'); }
+      setBusy(false);
+    };
+
+    // Per-device status pill — color matches what's actually happening on the device.
+    const renderStatus = (devId) => {
+      const j = jobs[devId];
+      if (!j) return <span style={{fontSize:10, color:'#A0AEC0'}}>off</span>;
+      const dev = devices[devId];
+      let text = 'queued', bg = '#EDF2F7', fg = '#4A5568';
+      if (dev?.isRecording)        { text = '● recording', bg = '#FED7D7', fg = '#C53030'; }
+      else if (!dev?.isOnline)     { text = '⏸ waiting (offline)', bg = '#FEFCBF', fg = '#975A16'; }
+      else                          { text = '◌ ready', bg = '#C6F6D5', fg = '#22543D'; }
+      return (
+        <span style={{
+          fontSize:10, fontWeight:700, padding:'2px 7px', borderRadius:10,
+          background: bg, color: fg, whiteSpace:'nowrap',
+        }}>{text}</span>
+      );
+    };
+
+    return (
+      <div style={{
+        background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
+        boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
+      }}>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6, gap:10, flexWrap:'wrap'}}>
+          <div style={{fontSize:16, fontWeight:700, color:'#2D3748'}}>
+            ♾ Auto-Record (Always On)
+          </div>
+          {Object.keys(jobs).length > 0 && (
+            <span style={{
+              fontSize:10, fontWeight:700, padding:'3px 8px', borderRadius:10,
+              background:'#C6F6D5', color:'#22543D',
+            }}>● {Object.keys(jobs).length} active</span>
+          )}
+        </div>
+        <div style={{fontSize:12, color:'#718096', marginBottom:14, lineHeight:1.45}}>
+          Pick devices and start. While enabled, the server keeps each device recording —
+          if the device is offline it waits, if it goes idle it auto-restarts. Survives server
+          restarts. Stop any time.
+        </div>
+
+        {devList.length === 0 ? (
+          <div style={{fontSize:13, color:'#A0AEC0', textAlign:'center', padding:'18px 0'}}>
+            No devices known yet. Connect a device first.
+          </div>
+        ) : (
+          <>
+            {/* Quick selection helpers */}
+            <div style={{display:'flex', gap:8, marginBottom:8, fontSize:11}}>
+              <button onClick={selectAll}  style={quickBtn}>Select all</button>
+              <button onClick={selectNone} style={quickBtn}>Clear</button>
+              <span style={{marginLeft:'auto', alignSelf:'center', color:'#A0AEC0'}}>
+                {selected.size}/{devList.length} selected
+              </span>
+            </div>
+
+            {/* Device list — tap a row to toggle selection */}
+            <div style={{
+              border:'1px solid #E2E8F0', borderRadius:10, overflow:'hidden', marginBottom:14,
+            }}>
+              {devList.map((d, i) => {
+                const checked = selected.has(d.deviceId);
+                return (
+                  <label
+                    key={d.deviceId}
+                    style={{
+                      display:'flex', alignItems:'center', gap:10,
+                      padding:'10px 12px', cursor:'pointer',
+                      background: checked ? '#EBF8FF' : '#FFF',
+                      borderTop: i === 0 ? 'none' : '1px solid #EDF2F7',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(d.deviceId)}
+                      style={{width:18, height:18, cursor:'pointer', flexShrink:0, accentColor:'#4A90A4'}}
+                    />
+                    <Dot online={d.isOnline} recording={d.isRecording} />
+                    <div style={{flex:1, minWidth:0}}>
+                      <div style={{
+                        fontSize:13, fontWeight:600, color:'#2D3748',
+                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                      }}>{d.deviceName || d.deviceId}</div>
+                      <div style={{fontSize:10, color:'#A0AEC0', marginTop:1}}>
+                        {d.isOnline ? 'online' : 'offline'}{d.isRecording ? ' · recording' : ''}
+                      </div>
+                    </div>
+                    {renderStatus(d.deviceId)}
+                  </label>
+                );
+              })}
+            </div>
+
+            {/* Duration picker for the supervisor */}
+            <div style={{fontSize:12, color:'#718096', marginBottom:4}}>
+              Recording chunk length (server restarts on this cycle)
+            </div>
+            <select
+              value={durSec}
+              onChange={e => setDurSec(Number(e.target.value))}
+              style={{
+                width:'100%', height:44, fontSize:14, fontWeight:600,
+                padding:'0 12px', borderRadius:10, border:'1.5px solid #E2E8F0',
+                background:'#F7FAFC', color:'#2D3748', boxSizing:'border-box',
+                marginBottom:12, WebkitAppearance:'none',
+              }}
+            >
+              {durationOpts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+
+            {/* Start / Stop / Stop all */}
+            <div style={{display:'flex', gap:8}}>
+              <button onClick={start} disabled={busy || selected.size===0} style={{
+                flex:'2 1 0', height:44, borderRadius:10, border:'none',
+                background: (busy || selected.size===0) ? '#A0AEC0' : '#38A169',
+                color:'#FFF', fontWeight:700, fontSize:14,
+                cursor: (busy || selected.size===0) ? 'not-allowed' : 'pointer',
+              }}>▶ Start ({selected.size})</button>
+              <button onClick={()=>stop({ all:false })} disabled={busy || selected.size===0} style={{
+                flex:'1 1 0', height:44, borderRadius:10, border:'1.5px solid #E53E3E',
+                background:'#FFF', color:'#E53E3E', fontWeight:700, fontSize:14,
+                cursor:(busy || selected.size===0) ? 'not-allowed' : 'pointer',
+                opacity: (busy || selected.size===0) ? 0.5 : 1,
+              }}>■ Stop</button>
+              {Object.keys(jobs).length > 0 && (
+                <button onClick={()=>stop({ all:true })} disabled={busy} style={{
+                  flex:'1 1 0', height:44, borderRadius:10, border:'none',
+                  background:'#E53E3E', color:'#FFF', fontWeight:700, fontSize:13,
+                  cursor: busy ? 'not-allowed' : 'pointer',
+                }}>Stop all</button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+  const quickBtn = {
+    padding:'5px 10px', borderRadius:7, border:'1px solid #E2E8F0',
+    background:'#F7FAFC', color:'#4A5568', fontWeight:700, cursor:'pointer',
+  };
+
   /* ─── Settings screen ───────────────────────────────────────── */
-  function SettingsScreen({ authCfg, onUpdated, onToast, onLogout, customDurations = [], onCustomDurationsChange }) {
+  function SettingsScreen({ authCfg, onUpdated, onToast, onLogout, customDurations = [], onCustomDurationsChange, devices = {}, autoRecord = { jobs: {} }, onAutoRecordRefresh }) {
     const [newDurMin, setNewDurMin] = useState('');
     const [newDurSec, setNewDurSec] = useState('');
     const presetVals = new Set(DURATIONS.map(d => d.value));
@@ -2592,6 +2812,14 @@
           )}
         </div>
 
+        <AutoRecordCard
+          devices={devices}
+          autoRecord={autoRecord}
+          customDurations={customDurations}
+          onToast={onToast}
+          onRefresh={onAutoRecordRefresh}
+        />
+
         <div style={{
           background:'#FFF', borderRadius:14, padding:20, marginBottom:14,
           boxShadow:'0 1px 6px rgba(0,0,0,0.07)',
@@ -2782,6 +3010,13 @@
       try {
         const r = await fetch('/api/trash');
         if (r.ok) setTrash(await r.json());
+      } catch {}
+    }, []);
+    const [autoRecord,      setAutoRecord]      = useState({ jobs: {} });
+    const fetchAutoRecord = useCallback(async () => {
+      try {
+        const r = await fetch('/api/auto-record');
+        if (r.ok) setAutoRecord(await r.json());
       } catch {}
     }, []);
     const fetchFavorites = useCallback(async () => {
@@ -2979,6 +3214,7 @@
         });
       });
       socket.on('active_bursts', snap => setBursts(snap || {}));
+      socket.on('auto_record_update', snap => setAutoRecord(snap || { jobs: {} }));
       socket.on('burst_error', d => showToast(`Burst error: ${d.error||'unknown'}`, 'error'));
       socket.on('recording_error', d =>
         showToast(`Recording error on ${d.deviceName||d.deviceId}: ${d.error}`, 'error')
@@ -3073,6 +3309,7 @@
       fetchNotes();
       fetchStorage();
       fetchTrash();
+      fetchAutoRecord();
       fetch('/api/screenshot-bursts').then(r=>r.ok?r.json():{}).then(setBursts).catch(()=>{});
       const storageInterval = setInterval(fetchStorage, 30000);
       const reconcileInterval = setInterval(() => {
@@ -3081,7 +3318,7 @@
         }).catch(()=>{});
       }, 8000);
       return () => { clearInterval(reconcileInterval); clearInterval(storageInterval); socket.disconnect(); Object.values(timerRefs.current).forEach(clearInterval); };
-    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, fetchStorage, fetchTrash, showToast]);
+    }, [fetchRec, fetchShot, fetchGallery, fetchApk, fetchFavorites, fetchNotes, fetchStorage, fetchTrash, fetchAutoRecord, showToast]);
 
     /* Refresh recycle-bin index whenever any of the live data sets change.
        Each delete triggers a fetchRec/Shot/Gallery — those state updates fire
@@ -3969,6 +4206,9 @@
               onLogout={onLogout}
               customDurations={customDurations}
               onCustomDurationsChange={(next)=>{ setCustomDurations(next); persistCustomDurations(next); }}
+              devices={devices}
+              autoRecord={autoRecord}
+              onAutoRecordRefresh={fetchAutoRecord}
             />
           )}
         </div>

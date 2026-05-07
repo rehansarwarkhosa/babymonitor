@@ -121,6 +121,7 @@ const AUTH_FILE = path.join(__dirname, "auth.json");
 const NOTES_FILE = path.join(__dirname, "notes.json");
 const SETTINGS_FILE = path.join(__dirname, "settings.json");
 const BURSTS_FILE = path.join(__dirname, "active-bursts.json");
+const AUTO_RECORD_FILE = path.join(__dirname, "auto-record.json");
 
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -2322,6 +2323,172 @@ app.get("/api/apk/info", (req, res) => {
   });
 });
 
+// ─── AUTO-RECORD JOBS (persistent, multi-device) ───────────
+// A simple per-device "always recording" supervisor. While a device is enabled
+// here, the server checks every AUTO_RECORD_TICK_MS whether the device is
+// (a) online and (b) not already recording — if both, it sends a start_recording
+// command with the configured duration. The job survives server restarts because
+// the enabled set is persisted to disk.
+const AUTO_RECORD_TICK_MS = 3000;
+const AUTO_RECORD_DEFAULT_SECONDS = 300; // 5 min — same as the UI default
+// Min gap between two start_recording triggers for the same device. Prevents
+// double-fires when a stale pong overwrites our optimistic isRecording flag
+// before the device's recording_started event arrives.
+const AUTO_RECORD_RETRIGGER_COOLDOWN_MS = 15000;
+
+// In-memory state (mirrored to disk on every change).
+//   jobs[deviceId] = { durationSeconds, startedAt, lastTriggerAt, lastStatus }
+const autoRecordJobs = new Map();
+
+function loadAutoRecord() {
+  try {
+    const j = JSON.parse(fs.readFileSync(AUTO_RECORD_FILE, "utf8"));
+    if (j && typeof j === "object" && j.jobs) {
+      Object.entries(j.jobs).forEach(([id, cfg]) => {
+        if (!cfg || typeof cfg !== "object") return;
+        const dur = Number(cfg.durationSeconds);
+        autoRecordJobs.set(id, {
+          durationSeconds: Number.isFinite(dur) && dur > 0 ? dur : AUTO_RECORD_DEFAULT_SECONDS,
+          startedAt: cfg.startedAt || new Date().toISOString(),
+          lastTriggerAt: cfg.lastTriggerAt || null,
+          lastStatus: cfg.lastStatus || "idle",
+        });
+      });
+    }
+  } catch {}
+}
+function saveAutoRecord() {
+  try {
+    const out = { jobs: {} };
+    autoRecordJobs.forEach((v, k) => { out.jobs[k] = v; });
+    fs.writeFileSync(AUTO_RECORD_FILE, JSON.stringify(out, null, 2));
+  } catch (e) { log(`saveAutoRecord error: ${e.message}`); }
+}
+
+function autoRecordSnapshot() {
+  const jobs = {};
+  autoRecordJobs.forEach((v, deviceId) => {
+    const dev = devices.get(deviceId);
+    jobs[deviceId] = {
+      deviceId,
+      deviceName: dev?.deviceName || deviceId,
+      isOnline: !!dev?.isOnline,
+      isRecording: !!dev?.isRecording,
+      durationSeconds: v.durationSeconds,
+      startedAt: v.startedAt,
+      lastTriggerAt: v.lastTriggerAt,
+      lastStatus: v.lastStatus,
+    };
+  });
+  return { jobs, count: autoRecordJobs.size };
+}
+function broadcastAutoRecord() {
+  io.emit("auto_record_update", autoRecordSnapshot());
+}
+
+// The supervisor tick. Fires for every enabled device on a fixed interval.
+// Cheap — just reads in-memory state and emits a socket event when needed.
+setInterval(() => {
+  if (autoRecordJobs.size === 0) return;
+  let changed = false;
+  autoRecordJobs.forEach((cfg, deviceId) => {
+    const dev = devices.get(deviceId);
+    if (!dev) {
+      if (cfg.lastStatus !== "missing") { cfg.lastStatus = "missing"; changed = true; }
+      return;
+    }
+    if (!dev.isOnline || !dev.socketId) {
+      if (cfg.lastStatus !== "waiting_offline") { cfg.lastStatus = "waiting_offline"; changed = true; }
+      return;
+    }
+    if (dev.isRecording) {
+      if (cfg.lastStatus !== "recording") { cfg.lastStatus = "recording"; changed = true; }
+      return;
+    }
+    // Cooldown guard: if we triggered very recently, hold off. This protects
+    // against the race where the device hasn't yet echoed recording_started
+    // and an interim pong reports isRecording=false, which would otherwise
+    // make us re-trigger and start a duplicate recording.
+    if (cfg.lastTriggerAt) {
+      const since = Date.now() - new Date(cfg.lastTriggerAt).getTime();
+      if (since < AUTO_RECORD_RETRIGGER_COOLDOWN_MS) {
+        if (cfg.lastStatus !== "settling") { cfg.lastStatus = "settling"; changed = true; }
+        return;
+      }
+    }
+    // Online + idle → trigger a recording. Mark it locally so the next tick
+    // doesn't double-fire before the device echoes back its recording_started.
+    io.to(dev.socketId).emit("start_recording", {
+      targetDeviceId: deviceId,
+      duration: cfg.durationSeconds,
+    });
+    dev.isRecording = true; // optimistic; the device will confirm
+    cfg.lastTriggerAt = new Date().toISOString();
+    cfg.lastStatus = "triggered";
+    changed = true;
+    log(`Auto-record: started on ${dev.deviceName} (${deviceId}), ${cfg.durationSeconds}s`);
+  });
+  if (changed) {
+    saveAutoRecord();
+    broadcastAutoRecord();
+    broadcastDevices();
+  }
+}, AUTO_RECORD_TICK_MS);
+
+// REST endpoints
+app.get("/api/auto-record", (req, res) => {
+  res.json(autoRecordSnapshot());
+});
+
+// Enable auto-record for one or more devices.
+// Body: { deviceIds: [...], durationSeconds?: number }
+app.post("/api/auto-record/start", (req, res) => {
+  const { deviceIds, durationSeconds } = req.body || {};
+  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+    return res.status(400).json({ error: "deviceIds array required" });
+  }
+  const dur = Number(durationSeconds);
+  const sec = Number.isFinite(dur) && dur >= 15 && dur <= 4 * 3600 ? Math.floor(dur) : AUTO_RECORD_DEFAULT_SECONDS;
+  const now = new Date().toISOString();
+  let added = 0, updated = 0;
+  deviceIds.forEach((id) => {
+    if (typeof id !== "string" || !id) return;
+    const existing = autoRecordJobs.get(id);
+    if (existing) {
+      existing.durationSeconds = sec;
+      updated++;
+    } else {
+      autoRecordJobs.set(id, {
+        durationSeconds: sec,
+        startedAt: now,
+        lastTriggerAt: null,
+        lastStatus: "idle",
+      });
+      added++;
+    }
+  });
+  saveAutoRecord();
+  broadcastAutoRecord();
+  log(`Auto-record start: ${added} new, ${updated} updated, duration=${sec}s`);
+  res.json({ success: true, added, updated, ...autoRecordSnapshot() });
+});
+
+// Disable auto-record. Body: { deviceIds: [...] } — omit/empty = stop all.
+app.post("/api/auto-record/stop", (req, res) => {
+  const { deviceIds } = req.body || {};
+  let removed = 0;
+  if (Array.isArray(deviceIds) && deviceIds.length > 0) {
+    deviceIds.forEach((id) => { if (autoRecordJobs.delete(id)) removed++; });
+  } else {
+    removed = autoRecordJobs.size;
+    autoRecordJobs.clear();
+  }
+  saveAutoRecord();
+  broadcastAutoRecord();
+  log(`Auto-record stop: ${removed} job(s) removed`);
+  res.json({ success: true, removed, ...autoRecordSnapshot() });
+});
+
 // ─── SOCKET.IO ──────────────────────────────────────────────
 
 const PING_INTERVAL = 30000;
@@ -2353,6 +2520,7 @@ io.on("connection", (socket) => {
   log(`Socket connected: ${socket.id}`);
 
   socket.emit("devices_update", getDevicesSnapshot());
+  socket.emit("auto_record_update", autoRecordSnapshot());
 
   socket.on("register", (data) => {
     try {
@@ -3119,4 +3287,8 @@ setInterval(() => {
 server.listen(PORT, () => {
   log(`Baby Monitor server running on http://localhost:${PORT}`);
   restoreBursts();
+  loadAutoRecord();
+  if (autoRecordJobs.size > 0) {
+    log(`Auto-record restored: ${autoRecordJobs.size} device(s) being supervised`);
+  }
 });
