@@ -2448,8 +2448,15 @@ app.post("/api/auto-record/start", (req, res) => {
   if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
     return res.status(400).json({ error: "deviceIds array required" });
   }
+  // Accept anything from 15 s up to 24 h per chunk. Reject out-of-range values
+  // explicitly instead of silently coercing to the 5-min default — a silent
+  // fallback was previously causing 720-min picks to come back as 5-min chunks.
   const dur = Number(durationSeconds);
-  const sec = Number.isFinite(dur) && dur >= 15 && dur <= 4 * 3600 ? Math.floor(dur) : AUTO_RECORD_DEFAULT_SECONDS;
+  const MAX_SEC = 24 * 3600;
+  if (durationSeconds !== undefined && !(Number.isFinite(dur) && dur >= 15 && dur <= MAX_SEC)) {
+    return res.status(400).json({ error: `durationSeconds must be 15..${MAX_SEC}` });
+  }
+  const sec = Number.isFinite(dur) && dur >= 15 ? Math.floor(dur) : AUTO_RECORD_DEFAULT_SECONDS;
   const now = new Date().toISOString();
   let added = 0, updated = 0;
   deviceIds.forEach((id) => {

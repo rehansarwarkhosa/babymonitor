@@ -2630,6 +2630,7 @@
             }}>
               {devList.map((d, i) => {
                 const checked = selected.has(d.deviceId);
+                const job = jobs[d.deviceId];
                 return (
                   <label
                     key={d.deviceId}
@@ -2654,6 +2655,7 @@
                       }}>{d.deviceName || d.deviceId}</div>
                       <div style={{fontSize:10, color:'#A0AEC0', marginTop:1}}>
                         {d.isOnline ? 'online' : 'offline'}{d.isRecording ? ' · recording' : ''}
+                        {job ? ` · ${formatDurationLabel(job.durationSeconds)} chunks` : ''}
                       </div>
                     </div>
                     {renderStatus(d.deviceId)}
