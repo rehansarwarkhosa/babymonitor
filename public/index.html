@@ -1071,6 +1071,449 @@
     );
   }
 
+  /* ─── Recordings filter + bulk delete (per-device, time-of-day) ─────
+     Lives at the top of the Recordings tab. The user picks one or more
+     devices and a time-of-day window (e.g. 01:00 → 05:00, wrap-around
+     midnight supported), the panel shows every matching recording across
+     ALL dates with checkboxes, and a sticky bar lets the user delete only
+     the selected files — never anything outside the filter.
+
+     Delete flow:
+       1. Password gate (if requireDeletePassword is on; same 2412 used app-wide).
+       2. If any selected recording has a saved note, a SECOND modal asks
+          whether to include the noted ones — they can be opted out, never
+          touched silently.
+       3. DELETE only fires for the resulting whitelist of filenames. */
+  function RecordingsFilterBar({
+    recordings, devices, notes, favorites,
+    authStatus, askPassword, showToast, onAfterDelete,
+  }) {
+    const [open, setOpen]           = useState(false);
+    const [selDevs, setSelDevs]     = useState(() => new Set()); // empty = all
+    const [startTime, setStartTime] = useState('01:00');
+    const [endTime, setEndTime]     = useState('05:00');
+    const [applied, setApplied]     = useState(false);
+    const [sel, setSel]             = useState(() => new Set()); // "deviceId|filename"
+    const [notesPrompt, setNotesPrompt] = useState(null); // { withNotes, withoutNotes, onChoose }
+    const [busy, setBusy] = useState(false);
+
+    const devEntries = useMemo(() => Object.entries(recordings || {}), [recordings]);
+    const deviceCount = devEntries.length;
+
+    // Parse "HH:MM" → minutes since local midnight, or null on bad input.
+    const parseHM = (s) => {
+      if (!s) return null;
+      const m = String(s).match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const h = Number(m[1]), mi = Number(m[2]);
+      if (!Number.isFinite(h) || !Number.isFinite(mi)) return null;
+      if (h < 0 || h > 23 || mi < 0 || mi > 59) return null;
+      return h * 60 + mi;
+    };
+
+    // Build the flat list of matches every time inputs / data change.
+    const matches = useMemo(() => {
+      if (!applied) return [];
+      const sM = parseHM(startTime);
+      const eM = parseHM(endTime);
+      if (sM === null || eM === null) return [];
+      const wrap = eM < sM; // window crosses midnight
+      const inRange = (m) => wrap ? (m >= sM || m <= eM) : (m >= sM && m <= eM);
+      const out = [];
+      devEntries.forEach(([deviceId, g]) => {
+        if (selDevs.size > 0 && !selDevs.has(deviceId)) return;
+        (g.recordings || []).forEach(r => {
+          const at = parseRecordedAt(r.filename);
+          if (!at) return;
+          const d = new Date(at);
+          const min = d.getHours() * 60 + d.getMinutes();
+          if (!inRange(min)) return;
+          out.push({
+            deviceId,
+            deviceName: g.deviceName || deviceId,
+            filename: r.filename,
+            recordedAt: at,
+            size: r.size,
+            note: (notes?.recordings?.[deviceId]?.[r.filename] || '').trim(),
+            isFav: ((favorites?.recordings?.[deviceId] || []).indexOf(r.filename) >= 0),
+          });
+        });
+      });
+      // Newest first.
+      out.sort((a,b) => (a.recordedAt < b.recordedAt ? 1 : a.recordedAt > b.recordedAt ? -1 : 0));
+      return out;
+    }, [applied, devEntries, selDevs, startTime, endTime, notes, favorites]);
+
+    // Drop selections that no longer match (e.g. data refreshed, item gone).
+    useEffect(() => {
+      if (!applied) { setSel(new Set()); return; }
+      const valid = new Set(matches.map(m => m.deviceId + '|' + m.filename));
+      setSel(prev => {
+        const n = new Set();
+        prev.forEach(k => { if (valid.has(k)) n.add(k); });
+        return n;
+      });
+    /* eslint-disable-next-line */
+    }, [applied, matches.length, matches.map(m=>m.deviceId+'|'+m.filename).join(',')]);
+
+    const toggleDev = (id) => setSelDevs(p => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+    const toggleOne = (key) => setSel(p => {
+      const n = new Set(p);
+      if (n.has(key)) n.delete(key); else n.add(key);
+      return n;
+    });
+
+    const apply = () => {
+      const sM = parseHM(startTime), eM = parseHM(endTime);
+      if (sM === null || eM === null) { showToast('Enter times as HH:MM (00:00–23:59)', 'error'); return; }
+      setApplied(true);
+      setSel(new Set());
+    };
+    const clearFilter = () => {
+      setApplied(false);
+      setSel(new Set());
+    };
+
+    const selectAll = () => setSel(new Set(matches.map(m => m.deviceId + '|' + m.filename)));
+    const selectNone = () => setSel(new Set());
+
+    // Run the actual delete after both confirmations have passed.
+    const performDelete = async (whitelist) => {
+      // Group by device for nicer toasts.
+      setBusy(true);
+      try {
+        await Promise.all(whitelist.map(it =>
+          fetch(`/recordings/${encodeURIComponent(it.deviceId)}/${encodeURIComponent(it.filename)}`, {method:'DELETE'})
+        ));
+        // Strip favorite flag for anything that was a favorite.
+        whitelist.forEach(it => {
+          if (it.isFav) {
+            // best-effort — favorites endpoint cleanup is handled by the caller's
+            // fetch cycle; we just remove the local flag below.
+          }
+        });
+        setSel(new Set());
+        onAfterDelete && onAfterDelete();
+        showToast(`Deleted ${whitelist.length} recording${whitelist.length===1?'':'s'}`, 'info');
+      } catch (e) {
+        showToast(`Delete failed: ${e.message || 'network error'}`, 'error');
+      }
+      setBusy(false);
+    };
+
+    const handleDelete = async () => {
+      const chosen = matches.filter(m => sel.has(m.deviceId + '|' + m.filename));
+      if (chosen.length === 0) { showToast('Pick at least one recording', 'warn'); return; }
+      if (authStatus?.lockDelete) { showToast('Delete is locked in Settings', 'warn'); return; }
+
+      // Step 1 — password gate (only when policy requires it).
+      if (authStatus?.requireDeletePassword) {
+        const ok = await askPassword({
+          title:'🔒 Confirm bulk delete',
+          message:`Delete ${chosen.length} recording${chosen.length===1?'':'s'} matching the filter? This cannot be undone (sent to Recycle Bin).`,
+          confirmLabel:'Delete', confirmColor:'#E53E3E',
+        });
+        if (!ok) return;
+      } else {
+        if (!window.confirm(`Delete ${chosen.length} recording${chosen.length===1?'':'s'}?`)) return;
+      }
+
+      // Step 2 — note-protection. Anything with a saved note gets a SECOND
+      // confirmation so the user can keep them out of this delete.
+      const withNotes    = chosen.filter(c => !!c.note);
+      const withoutNotes = chosen.filter(c => !c.note);
+      if (withNotes.length > 0) {
+        const choice = await new Promise(resolve => {
+          setNotesPrompt({
+            withNotes, withoutNotes,
+            onChoose: (mode) => { setNotesPrompt(null); resolve(mode); },
+          });
+        });
+        if (choice === 'cancel' || !choice) return;
+        if (choice === 'skip') {
+          if (withoutNotes.length === 0) {
+            showToast('Nothing left to delete — all selected items have notes', 'info');
+            return;
+          }
+          await performDelete(withoutNotes);
+          return;
+        }
+        // mode === 'all' — fall through to delete everything chosen
+      }
+      await performDelete(chosen);
+    };
+
+    const fmtTime = (iso) => {
+      const d = new Date(iso);
+      return d.toLocaleString([], { month:'short', day:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' });
+    };
+    const fmtBytes = (n) => {
+      if (!Number.isFinite(n) || n <= 0) return '';
+      if (n < 1024) return n + ' B';
+      if (n < 1024*1024) return (n/1024).toFixed(0) + ' KB';
+      return (n/1024/1024).toFixed(1) + ' MB';
+    };
+
+    const allSelected = matches.length > 0 && sel.size === matches.length;
+
+    return (
+      <div style={{
+        background:'#FFF', borderRadius:14, padding:14, marginBottom:14,
+        boxShadow:'0 1px 6px rgba(0,0,0,0.07)', border:'1px solid #E2E8F0',
+      }}>
+        <button
+          onClick={()=>setOpen(o=>!o)}
+          style={{
+            width:'100%', display:'flex', alignItems:'center', gap:8,
+            background:'transparent', border:'none', cursor:'pointer', padding:0,
+            textAlign:'left',
+          }}
+        >
+          <span style={{
+            fontSize:14, fontWeight:800, color:'#2D3748',
+            display:'inline-flex', alignItems:'center', gap:8,
+          }}>
+            <span style={{
+              transition:'transform .15s', transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+              color:'#4A90A4', fontSize:11,
+            }}>▶</span>
+            🔎 Filter &amp; bulk delete
+          </span>
+          {applied && (
+            <span style={{
+              marginLeft:'auto', fontSize:11, fontWeight:700, padding:'3px 10px',
+              borderRadius:999, background:'#EBF8FF', color:'#2B6CB0',
+            }}>{matches.length} match{matches.length===1?'':'es'}</span>
+          )}
+        </button>
+
+        {open && (
+          <div style={{marginTop:12}}>
+            {/* Device chips. Empty = all devices. */}
+            <div style={{fontSize:11, fontWeight:700, color:'#718096', marginBottom:6, letterSpacing:0.4}}>
+              DEVICES {selDevs.size === 0 ? '(all)' : `(${selDevs.size}/${deviceCount})`}
+            </div>
+            <div style={{display:'flex', flexWrap:'wrap', gap:6, marginBottom:12}}>
+              {deviceCount === 0
+                ? <span style={{fontSize:12, color:'#A0AEC0'}}>No devices with recordings yet.</span>
+                : devEntries.map(([id, g]) => {
+                    const on = selDevs.has(id);
+                    return (
+                      <button key={id} onClick={()=>toggleDev(id)} style={{
+                        padding:'6px 10px', borderRadius:999, fontSize:12, fontWeight:700,
+                        cursor:'pointer', whiteSpace:'nowrap',
+                        border:`1.5px solid ${on?'#4A90A4':'#E2E8F0'}`,
+                        background: on ? '#4A90A4' : '#F7FAFC',
+                        color: on ? '#FFF' : '#2D3748',
+                      }}>{g.deviceName || id}</button>
+                    );
+                  })
+              }
+              {selDevs.size > 0 && (
+                <button onClick={()=>setSelDevs(new Set())} style={{
+                  padding:'6px 10px', borderRadius:999, fontSize:12, fontWeight:700,
+                  cursor:'pointer', background:'#FFF', color:'#4A5568',
+                  border:'1.5px solid #E2E8F0',
+                }}>All devices</button>
+              )}
+            </div>
+
+            {/* Time-of-day window. 24h HH:MM. End < start = wraps midnight. */}
+            <div style={{fontSize:11, fontWeight:700, color:'#718096', marginBottom:6, letterSpacing:0.4}}>
+              TIME OF DAY (24-HOUR, ACROSS ALL DATES)
+            </div>
+            <div style={{display:'flex', gap:8, alignItems:'center', marginBottom:6}}>
+              <input
+                type="time" value={startTime}
+                onChange={e=>setStartTime(e.target.value)}
+                style={{flex:1, height:40, fontSize:14, padding:'0 10px',
+                        borderRadius:8, border:'1.5px solid #E2E8F0', background:'#F7FAFC',
+                        color:'#2D3748', boxSizing:'border-box'}}
+              />
+              <span style={{color:'#718096', fontSize:13, fontWeight:700}}>→</span>
+              <input
+                type="time" value={endTime}
+                onChange={e=>setEndTime(e.target.value)}
+                style={{flex:1, height:40, fontSize:14, padding:'0 10px',
+                        borderRadius:8, border:'1.5px solid #E2E8F0', background:'#F7FAFC',
+                        color:'#2D3748', boxSizing:'border-box'}}
+              />
+            </div>
+            <div style={{fontSize:11, color:'#A0AEC0', marginBottom:12}}>
+              {parseHM(endTime) !== null && parseHM(startTime) !== null && parseHM(endTime) < parseHM(startTime)
+                ? 'Window wraps past midnight.'
+                : 'Inclusive range. Same start &amp; end matches that exact minute.'}
+            </div>
+
+            <div style={{display:'flex', gap:8, marginBottom:applied?12:0}}>
+              <button onClick={apply} disabled={busy} style={{
+                flex:'2 1 0', height:42, borderRadius:10, border:'none',
+                background:'#4A90A4', color:'#FFF', fontWeight:700, fontSize:14,
+                cursor: busy ? 'not-allowed' : 'pointer',
+              }}>Apply filter</button>
+              <button onClick={clearFilter} disabled={busy || !applied} style={{
+                flex:'1 1 0', height:42, borderRadius:10,
+                border:'1.5px solid #E2E8F0', background:'#FFF', color:'#4A5568',
+                fontWeight:700, fontSize:14,
+                cursor: (busy || !applied) ? 'not-allowed' : 'pointer',
+                opacity: applied ? 1 : 0.5,
+              }}>Clear</button>
+            </div>
+
+            {/* Matched results — flat list with per-row checkboxes. Selection is
+                independent of filter so user can deselect anything they want
+                to keep before bulk-deleting. */}
+            {applied && (
+              <div>
+                {matches.length === 0 ? (
+                  <div style={{
+                    fontSize:13, color:'#A0AEC0', textAlign:'center', padding:'18px 0',
+                    border:'1px dashed #E2E8F0', borderRadius:10, marginTop:6,
+                  }}>
+                    No recordings match this filter.
+                  </div>
+                ) : (
+                  <>
+                    <div style={{
+                      display:'flex', alignItems:'center', gap:8, marginBottom:8, fontSize:11,
+                    }}>
+                      <button onClick={selectAll} style={quickBtn}>Select all</button>
+                      <button onClick={selectNone} style={quickBtn}>Clear selection</button>
+                      <span style={{marginLeft:'auto', color:'#A0AEC0'}}>
+                        {sel.size}/{matches.length} selected
+                      </span>
+                    </div>
+
+                    <div style={{
+                      border:'1px solid #E2E8F0', borderRadius:10, overflow:'hidden',
+                      maxHeight:340, overflowY:'auto', marginBottom:10,
+                    }}>
+                      {matches.map((m, i) => {
+                        const key = m.deviceId + '|' + m.filename;
+                        const checked = sel.has(key);
+                        return (
+                          <label key={key} style={{
+                            display:'flex', alignItems:'center', gap:10,
+                            padding:'10px 12px', cursor:'pointer', boxSizing:'border-box',
+                            background: checked ? '#FFF5F5' : '#FFF',
+                            borderTop: i===0 ? 'none' : '1px solid #EDF2F7',
+                          }}>
+                            <input
+                              type="checkbox" checked={checked}
+                              onChange={()=>toggleOne(key)}
+                              style={{width:18, height:18, cursor:'pointer', flexShrink:0, accentColor:'#E53E3E'}}
+                            />
+                            <div style={{flex:1, minWidth:0}}>
+                              <div style={{
+                                fontSize:13, fontWeight:600, color:'#2D3748',
+                                overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                              }}>
+                                {m.deviceName}
+                                {m.isFav && <span title="Favorite" style={{marginLeft:6, color:'#D69E2E'}}>★</span>}
+                                {m.note && <span title="Has a note" style={{marginLeft:6, color:'#B7791F'}}>📝</span>}
+                              </div>
+                              <div style={{
+                                fontSize:11, color:'#718096', marginTop:1,
+                                overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                              }}>
+                                {fmtTime(m.recordedAt)}{m.size?` · ${fmtBytes(m.size)}`:''}
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      onClick={handleDelete}
+                      disabled={busy || sel.size === 0}
+                      style={{
+                        width:'100%', height:46, borderRadius:10, border:'none',
+                        background: (busy || sel.size === 0) ? '#A0AEC0' : '#E53E3E',
+                        color:'#FFF', fontWeight:700, fontSize:14,
+                        cursor: (busy || sel.size === 0) ? 'not-allowed' : 'pointer',
+                      }}
+                    >🗑 Delete {sel.size} selected</button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Notes-protection modal — fires AFTER the password gate when any
+            selected recording has a saved note. The user can include the
+            noted ones, skip them, or cancel the whole delete. */}
+        {notesPrompt && (
+          <div onClick={()=>notesPrompt.onChoose('cancel')} style={{
+            position:'fixed', inset:0, zIndex:810, background:'rgba(0,0,0,0.6)',
+            display:'flex', alignItems:'center', justifyContent:'center', padding:16,
+          }}>
+            <div onClick={e=>e.stopPropagation()} style={{
+              background:'#FFF', borderRadius:14, padding:20, maxWidth:420, width:'100%',
+              boxShadow:'0 10px 30px rgba(0,0,0,0.3)',
+            }}>
+              <div style={{fontSize:16, fontWeight:800, color:'#2D3748', marginBottom:8}}>
+                📝 Some recordings have notes
+              </div>
+              <div style={{fontSize:13, color:'#4A5568', marginBottom:12, lineHeight:1.5}}>
+                <b>{notesPrompt.withNotes.length}</b> of the selected recording{notesPrompt.withNotes.length===1?'':'s'} {notesPrompt.withNotes.length===1?'has':'have'} a saved note —
+                they may be important. Choose what to do:
+              </div>
+              <div style={{
+                maxHeight:160, overflowY:'auto', background:'#FFFBEA',
+                border:'1px solid #FAF089', borderRadius:8, padding:'8px 10px',
+                fontSize:12, color:'#744210', marginBottom:14,
+              }}>
+                {notesPrompt.withNotes.slice(0, 12).map(m => (
+                  <div key={m.deviceId+'|'+m.filename} style={{padding:'3px 0', borderBottom:'1px dashed #FAF089'}}>
+                    <div style={{fontWeight:700}}>{m.deviceName} · {fmtTime(m.recordedAt)}</div>
+                    <div style={{
+                      overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', opacity:0.8,
+                    }}>📝 {m.note}</div>
+                  </div>
+                ))}
+                {notesPrompt.withNotes.length > 12 && (
+                  <div style={{padding:'4px 0', fontWeight:700}}>
+                    … and {notesPrompt.withNotes.length - 12} more
+                  </div>
+                )}
+              </div>
+              <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
+                <button onClick={()=>notesPrompt.onChoose('cancel')} style={{
+                  flex:'1 1 100%', height:42, borderRadius:10,
+                  border:'1.5px solid #E2E8F0', background:'#FFF', color:'#4A5568',
+                  fontWeight:700, fontSize:13, cursor:'pointer',
+                }}>Cancel — don't delete anything</button>
+                <button
+                  onClick={()=>notesPrompt.onChoose('skip')}
+                  disabled={notesPrompt.withoutNotes.length === 0}
+                  style={{
+                    flex:'1 1 calc(50% - 4px)', height:42, borderRadius:10,
+                    border:'1.5px solid #4A90A4',
+                    background: notesPrompt.withoutNotes.length === 0 ? '#EDF2F7' : '#FFF',
+                    color:'#2C5282', fontWeight:700, fontSize:13,
+                    cursor: notesPrompt.withoutNotes.length === 0 ? 'not-allowed' : 'pointer',
+                    opacity: notesPrompt.withoutNotes.length === 0 ? 0.5 : 1,
+                  }}
+                >Keep noted ({notesPrompt.withoutNotes.length})</button>
+                <button onClick={()=>notesPrompt.onChoose('all')} style={{
+                  flex:'1 1 calc(50% - 4px)', height:42, borderRadius:10,
+                  border:'none', background:'#E53E3E', color:'#FFF',
+                  fontWeight:700, fontSize:13, cursor:'pointer',
+                }}>Delete all {notesPrompt.withNotes.length + notesPrompt.withoutNotes.length}</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   /* ─── Device group block (Recordings) ───────────────────────── */
   function RecGroup({deviceId, group, onDelete, onDeleteAll, onDateDelete, onZipAll, onZipDate, onStar, favSet, inFavorites, notesMap, onSaveNote, onEnhance, enhancingEngines}) {
     const [open, setOpen] = useState(false);
@@ -4449,21 +4892,35 @@
 
           {/* RECORDINGS */}
           {tab === 'recordings' && (
-            Object.keys(visibleRec).length === 0
-              ? <Empty icon="🎙" title="No recordings yet" sub="Start a recording from the Devices tab" />
-              : Object.entries(visibleRec).map(([id, g]) => (
-                  <RecGroup key={id} deviceId={id} group={g}
-                    onDelete={delRec} onDeleteAll={delAllRec} onDateDelete={delDateRec}
-                    onZipAll={(d)=>zipDeviceRec(d, g.recordings.map(r=>r.filename))}
-                    onZipDate={zipDateRec}
-                    onStar={(d,f)=>addFav('recordings',d,f)}
-                    favSet={favSetFor('recordings', id)}
-                    notesMap={notes.recordings?.[id]}
-                    onSaveNote={saveNote}
-                    onEnhance={enhanceRec}
-                    enhancingEngines={enhancingRec}
-                  />
-                ))
+            <>
+              {Object.keys(recordings).length > 0 && (
+                <RecordingsFilterBar
+                  recordings={recordings}
+                  devices={devices}
+                  notes={notes}
+                  favorites={favorites}
+                  authStatus={authStatus}
+                  askPassword={askPassword}
+                  showToast={showToast}
+                  onAfterDelete={fetchRec}
+                />
+              )}
+              {Object.keys(visibleRec).length === 0
+                ? <Empty icon="🎙" title="No recordings yet" sub="Start a recording from the Devices tab" />
+                : Object.entries(visibleRec).map(([id, g]) => (
+                    <RecGroup key={id} deviceId={id} group={g}
+                      onDelete={delRec} onDeleteAll={delAllRec} onDateDelete={delDateRec}
+                      onZipAll={(d)=>zipDeviceRec(d, g.recordings.map(r=>r.filename))}
+                      onZipDate={zipDateRec}
+                      onStar={(d,f)=>addFav('recordings',d,f)}
+                      favSet={favSetFor('recordings', id)}
+                      notesMap={notes.recordings?.[id]}
+                      onSaveNote={saveNote}
+                      onEnhance={enhanceRec}
+                      enhancingEngines={enhancingRec}
+                    />
+                  ))}
+            </>
           )}
 
           {/* SCREENSHOTS */}

@@ -2352,6 +2352,7 @@ function loadAutoRecord() {
           durationSeconds: Number.isFinite(dur) && dur > 0 ? dur : AUTO_RECORD_DEFAULT_SECONDS,
           startedAt: cfg.startedAt || new Date().toISOString(),
           lastTriggerAt: cfg.lastTriggerAt || null,
+          lastStopAt: cfg.lastStopAt || null,
           lastStatus: cfg.lastStatus || "idle",
         });
       });
@@ -2389,6 +2390,16 @@ function broadcastAutoRecord() {
 
 // The supervisor tick. Fires for every enabled device on a fixed interval.
 // Cheap — just reads in-memory state and emits a socket event when needed.
+//
+// Re-trigger gating (in order of precedence) — designed so that a flickery
+// pong reporting isRecording=false in the middle of a long chunk CANNOT cause
+// a short premature re-trigger:
+//   1. Device offline / unknown / actually-recording → no trigger.
+//   2. Triggered very recently (< AUTO_RECORD_RETRIGGER_COOLDOWN_MS) → settling.
+//   3. Expected chunk window still open AND we never received a confirmed
+//      `recording_stopped` after our last trigger → device claim of "idle"
+//      is treated as a transient pong race. Hold off.
+//   4. Otherwise → trigger.
 setInterval(() => {
   if (autoRecordJobs.size === 0) return;
   let changed = false;
@@ -2410,15 +2421,30 @@ setInterval(() => {
     // against the race where the device hasn't yet echoed recording_started
     // and an interim pong reports isRecording=false, which would otherwise
     // make us re-trigger and start a duplicate recording.
-    if (cfg.lastTriggerAt) {
-      const since = Date.now() - new Date(cfg.lastTriggerAt).getTime();
-      if (since < AUTO_RECORD_RETRIGGER_COOLDOWN_MS) {
+    const now = Date.now();
+    const lastTriggerMs = cfg.lastTriggerAt ? new Date(cfg.lastTriggerAt).getTime() : 0;
+    const lastStopMs = cfg.lastStopAt ? new Date(cfg.lastStopAt).getTime() : 0;
+    if (lastTriggerMs && (now - lastTriggerMs) < AUTO_RECORD_RETRIGGER_COOLDOWN_MS) {
+      if (cfg.lastStatus !== "settling") { cfg.lastStatus = "settling"; changed = true; }
+      return;
+    }
+    // Expected-end gating: while we're still inside the chunk window the
+    // server itself requested, a pong that says isRecording=false is treated
+    // as a transient race unless the device ALSO sent us a recording_stopped
+    // event after our last trigger. This is the key guard against short
+    // premature chunks when a stale pong overwrites the device's true state.
+    if (lastTriggerMs) {
+      const expectedEnd = lastTriggerMs + cfg.durationSeconds * 1000;
+      const insideWindow = now < expectedEnd - 5000; // small leeway
+      const confirmedStop = lastStopMs > lastTriggerMs;
+      if (insideWindow && !confirmedStop) {
         if (cfg.lastStatus !== "settling") { cfg.lastStatus = "settling"; changed = true; }
         return;
       }
     }
-    // Online + idle → trigger a recording. Mark it locally so the next tick
-    // doesn't double-fire before the device echoes back its recording_started.
+    // Online + idle (and either the chunk window has elapsed or the device
+    // explicitly confirmed stop) → trigger a recording. Mark it locally so
+    // the next tick doesn't double-fire before recording_started arrives.
     io.to(dev.socketId).emit("start_recording", {
       targetDeviceId: deviceId,
       duration: cfg.durationSeconds,
@@ -2427,7 +2453,7 @@ setInterval(() => {
     cfg.lastTriggerAt = new Date().toISOString();
     cfg.lastStatus = "triggered";
     changed = true;
-    log(`Auto-record: started on ${dev.deviceName} (${deviceId}), ${cfg.durationSeconds}s`);
+    log(`Auto-record: started on ${dev.deviceName} (${deviceId}), duration=${cfg.durationSeconds}s (${(cfg.durationSeconds/60).toFixed(1)} min)`);
   });
   if (changed) {
     saveAutoRecord();
@@ -2470,6 +2496,7 @@ app.post("/api/auto-record/start", (req, res) => {
         durationSeconds: sec,
         startedAt: now,
         lastTriggerAt: null,
+        lastStopAt: null,
         lastStatus: "idle",
       });
       added++;
@@ -2736,7 +2763,19 @@ io.on("connection", (socket) => {
   socket.on("start_recording", (data) => {
     try {
       const targetId = (data && data.targetDeviceId) || "all";
-      const duration = (data && data.duration) || 300;
+      // Require an explicit duration from the caller. Previously this silently
+      // fell back to 300 s (5 min) which masked dashboard bugs and could turn
+      // a 12-hour auto-record session into 5-min chunks. Refuse loudly instead.
+      const rawDur = data && data.duration;
+      const duration = Number(rawDur);
+      if (!Number.isFinite(duration) || duration < 15) {
+        log(`Rejected start_recording from ${socket.id}: missing/invalid duration (got ${rawDur})`);
+        socket.emit("recording_error", {
+          deviceId: targetId,
+          error: "Missing or invalid duration",
+        });
+        return;
+      }
 
       if (targetId === "all") {
         devices.forEach((dev) => {
@@ -2844,6 +2883,14 @@ io.on("connection", (socket) => {
         log(`Recording stopped: ${devices.get(deviceId).deviceName} (${deviceId})`);
         broadcastDevices();
       }
+      // Mark the confirmed-stop time for the auto-record supervisor so it knows
+      // this is a real stop (not a flickery pong) and can re-trigger after the
+      // normal cooldown without waiting out the full chunk window.
+      if (deviceId && autoRecordJobs.has(deviceId)) {
+        const cfg = autoRecordJobs.get(deviceId);
+        cfg.lastStopAt = new Date().toISOString();
+        saveAutoRecord();
+      }
     } catch (e) {
       log(`Error in recording_stopped: ${e.message}`);
     }
@@ -2878,6 +2925,13 @@ io.on("connection", (socket) => {
           `Upload complete from ${deviceId}: ${(data && data.filename) || ""}`,
         );
         broadcastDevices();
+      }
+      // Treat a completed upload as a confirmed stop for the supervisor — the
+      // chunk has fully closed out, so a re-trigger after cooldown is safe.
+      if (deviceId && autoRecordJobs.has(deviceId)) {
+        const cfg = autoRecordJobs.get(deviceId);
+        cfg.lastStopAt = new Date().toISOString();
+        saveAutoRecord();
       }
     } catch (e) {
       log(`Error in upload_complete: ${e.message}`);
